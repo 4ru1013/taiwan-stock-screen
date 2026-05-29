@@ -5,12 +5,13 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 import requests
-from FinMind.data import DataLoader
 
 ETF_SOURCES = {
     "00981A": "https://github.com/4ru1013/united-etf-00981a-portfolio/blob/main/data/out/00981A_latest.csv?raw=1",
     "00992A": "https://github.com/4ru1013/capital-etf-00992a-portfolio/blob/main/data/out/00992A_latest.csv?raw=1",
 }
+
+FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 TAIEX_SYMBOL = "TAIEX"
 OUTPUT_DIR = pathlib.Path("output")
 RAW_DIR = pathlib.Path("data/raw")
@@ -30,7 +31,6 @@ def read_csv_from_url(url: str) -> pd.DataFrame:
     resp = requests.get(url, timeout=60)
     resp.raise_for_status()
     from io import StringIO
-
     return pd.read_csv(StringIO(resp.text), dtype={"code": "string"})
 
 
@@ -42,8 +42,7 @@ def load_previous_holding_codes() -> dict[str, set[str]]:
     except Exception as exc:
         print(f"[WARN] Failed to read previous holdings: {exc}")
         return {etf: set() for etf in ETF_SOURCES}
-    required = {"etf_code", "code"}
-    if not required.issubset(set(prev.columns)):
+    if not {"etf_code", "code"}.issubset(set(prev.columns)):
         print("[WARN] Previous holdings format invalid; new-holding flags disabled for this run.")
         return {etf: set() for etf in ETF_SOURCES}
     prev["code"] = prev["code"].map(normalize_code)
@@ -64,16 +63,12 @@ def load_etf_holdings() -> pd.DataFrame:
         df["code"] = df["code"].map(normalize_code)
         df["name"] = df["name"].astype(str).str.strip()
         df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0).astype(int)
-        if "weight" in df.columns:
-            df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
-        else:
-            df["weight"] = np.nan
+        df["weight"] = pd.to_numeric(df["weight"], errors="coerce") if "weight" in df.columns else np.nan
         df = df.sort_values(["weight", "shares"], ascending=[False, False]).reset_index(drop=True)
         df["etf_code"] = etf_code
         df["etf_rank"] = np.arange(1, len(df) + 1)
         df["is_top10"] = df["etf_rank"] <= 10
         prior = previous_codes.get(etf_code, set())
-        # First run: do not mark every holding as new.
         df["is_new"] = False if not prior else ~df["code"].isin(prior)
         frames.append(df[["etf_code", "code", "name", "shares", "weight", "etf_rank", "is_top10", "is_new"]])
     all_holdings = pd.concat(frames, ignore_index=True)
@@ -121,25 +116,45 @@ def build_candidate_pool(holdings: pd.DataFrame) -> pd.DataFrame:
     return pool
 
 
-def setup_finmind() -> DataLoader:
-    api = DataLoader()
+def finmind_request(dataset: str, stock_id: str, start_date: str, end_date: str) -> pd.DataFrame:
+    params = {
+        "dataset": dataset,
+        "data_id": stock_id,
+        "start_date": start_date,
+        "end_date": end_date,
+    }
     token = os.getenv("FINMIND_TOKEN", "").strip()
     if token:
-        api.login_by_token(api_token=token)
-    return api
-
-
-def fetch_stock_price(api: DataLoader, stock_id: str, start_date: str, end_date: str) -> pd.DataFrame:
-    df = api.taiwan_stock_daily(stock_id=stock_id, start_date=start_date, end_date=end_date)
-    if df is None or df.empty:
+        params["token"] = token
+    resp = requests.get(FINMIND_API_URL, params=params, timeout=60)
+    resp.raise_for_status()
+    payload = resp.json()
+    if not payload.get("data"):
         return pd.DataFrame()
-    df = df.copy()
+    df = pd.DataFrame(payload["data"])
+    if "stock_id" not in df.columns:
+        df["stock_id"] = stock_id
     df["stock_id"] = df["stock_id"].astype(str)
     return df
 
 
+def fetch_stock_price(stock_id: str, start_date: str, end_date: str) -> pd.DataFrame:
+    # Stocks use adjusted prices for every technical calculation.
+    dataset = "TaiwanStockPrice" if stock_id == TAIEX_SYMBOL else "TaiwanStockPriceAdj"
+    df = finmind_request(dataset, stock_id, start_date, end_date)
+    if df.empty:
+        return pd.DataFrame()
+    # Standardize adjusted close column name. In TaiwanStockPriceAdj, close is adjusted close.
+    df = df.copy()
+    df["close_adj"] = pd.to_numeric(df["close"], errors="coerce")
+    if "Trading_Volume" in df.columns:
+        df["Trading_Volume"] = pd.to_numeric(df["Trading_Volume"], errors="coerce")
+    else:
+        df["Trading_Volume"] = np.nan
+    return df
+
+
 def fetch_all_prices(pool: pd.DataFrame, days_back: int = 430) -> pd.DataFrame:
-    api = setup_finmind()
     end = date.today()
     start = end - timedelta(days=days_back)
     start_s = start.strftime("%Y-%m-%d")
@@ -149,9 +164,9 @@ def fetch_all_prices(pool: pd.DataFrame, days_back: int = 430) -> pd.DataFrame:
     ids = pool["code"].dropna().astype(str).unique().tolist()
     ids_with_benchmark = ids + [TAIEX_SYMBOL]
     for i, sid in enumerate(ids_with_benchmark, 1):
-        print(f"[INFO] Fetch price {i}/{len(ids_with_benchmark)}: {sid}")
+        print(f"[INFO] Fetch adjusted price {i}/{len(ids_with_benchmark)}: {sid}")
         try:
-            df = fetch_stock_price(api, sid, start_s, end_s)
+            df = fetch_stock_price(sid, start_s, end_s)
         except Exception as exc:
             print(f"[WARN] Failed to fetch {sid}: {exc}")
             continue
@@ -169,7 +184,7 @@ def fetch_all_prices(pool: pd.DataFrame, days_back: int = 430) -> pd.DataFrame:
 
 def add_indicators_for_one(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values("date").copy()
-    close = pd.to_numeric(df["close"], errors="coerce")
+    close = pd.to_numeric(df["close_adj"], errors="coerce")
     volume = pd.to_numeric(df["Trading_Volume"], errors="coerce")
 
     df["ma5"] = close.rolling(5).mean()
@@ -180,7 +195,6 @@ def add_indicators_for_one(df: pd.DataFrame) -> pd.DataFrame:
     df["ret_5d"] = close / close.shift(5) - 1
     df["ret_20d"] = close / close.shift(20) - 1
     df["ret_60d"] = close / close.shift(60) - 1
-    df["ret_120d"] = close / close.shift(120) - 1
 
     ema8 = close.ewm(span=8, adjust=False).mean()
     ema17 = close.ewm(span=17, adjust=False).mean()
@@ -198,9 +212,7 @@ def add_indicators_for_one(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_indicators(prices: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
-    pieces = []
-    for sid, g in prices.groupby("stock_id"):
-        pieces.append(add_indicators_for_one(g))
+    pieces = [add_indicators_for_one(g) for _, g in prices.groupby("stock_id")]
     ind = pd.concat(pieces, ignore_index=True)
     latest = ind.sort_values("date").groupby("stock_id").tail(1).copy()
 
@@ -209,18 +221,21 @@ def build_indicators(prices: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
         raise RuntimeError("Missing TAIEX benchmark; cannot calculate RS.")
     bench_ret20 = float(bench["ret_20d"].iloc[0])
     bench_ret60 = float(bench["ret_60d"].iloc[0])
+    bench_date = str(bench["date"].iloc[0])
+    print(f"[INFO] Benchmark latest date: {bench_date}, ret20={bench_ret20:.4f}, ret60={bench_ret60:.4f}")
 
     latest = latest[latest["stock_id"] != TAIEX_SYMBOL].copy()
     latest["rs20"] = latest["ret_20d"] - bench_ret20
     latest["rs60"] = latest["ret_60d"] - bench_ret60
-    latest["rs_score"] = 0.4 * latest["rs20"] + 0.6 * latest["rs60"]
+    latest["rs_accel"] = latest["rs20"] - latest["rs60"]
+    latest["rs_score"] = 0.7 * latest["rs20"] + 0.3 * latest["rs_accel"]
     latest["rs_rank"] = latest["rs_score"].rank(pct=True, ascending=True) * 100
     latest["rs_rank"] = latest["rs_rank"].round(1)
 
     latest = latest.rename(columns={"stock_id": "code"})
     keep_cols = [
-        "code", "date", "close", "Trading_Volume", "ma5", "ma20", "ma60", "vol_ma20", "volume_ratio",
-        "ret_5d", "ret_20d", "ret_60d", "ret_120d", "rs20", "rs60", "rs_score", "rs_rank",
+        "code", "date", "close_adj", "Trading_Volume", "ma5", "ma20", "ma60", "vol_ma20", "volume_ratio",
+        "ret_5d", "ret_20d", "ret_60d", "rs20", "rs60", "rs_accel", "rs_score", "rs_rank",
         "dif", "macd", "osc", "osc_prev", "macd_cross_up", "osc_turn_positive",
         "above_ma20", "dist_ma20_pct", "is_20d_high"
     ]
@@ -231,6 +246,7 @@ def build_indicators(prices: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
 def add_research_score(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     rs_component = out["rs_rank"].fillna(0)
+    accel_component = out["rs_accel"].fillna(0).rank(pct=True, ascending=True) * 100
     etf_component = out["etf_count"].fillna(0).clip(upper=2) / 2 * 100
     top10_component = ((out["00981A_top10"].fillna(False)) | (out["00992A_top10"].fillna(False))).astype(int) * 100
     new_component = ((out["00981A_new"].fillna(False)) | (out["00992A_new"].fillna(False))).astype(int) * 100
@@ -240,11 +256,12 @@ def add_research_score(df: pd.DataFrame) -> pd.DataFrame:
         + out["macd_cross_up"].fillna(False).astype(int) * 30
     )
     out["research_score"] = (
-        0.40 * rs_component
+        0.35 * rs_component
+        + 0.15 * accel_component
         + 0.15 * etf_component
-        + 0.20 * top10_component
+        + 0.15 * top10_component
         + 0.10 * new_component
-        + 0.15 * timing_component
+        + 0.10 * timing_component
     ).round(1)
     return out.sort_values(["research_score", "rs_rank", "etf_count"], ascending=[False, False, False]).reset_index(drop=True)
 
@@ -255,10 +272,10 @@ def export_excel(screen: pd.DataFrame, pool: pd.DataFrame, holdings: pd.DataFram
     latest_path = OUTPUT_DIR / "daily_screen_latest.xlsx"
 
     watch_cols = [
-        "code", "name", "research_score", "rs_rank", "rs20", "rs60", "etf_list", "etf_count",
+        "code", "name", "research_score", "rs_rank", "rs20", "rs60", "rs_accel", "etf_list", "etf_count",
         "00981A_top10", "00992A_top10", "00981A_new", "00992A_new",
         "00981A_rank", "00992A_rank", "00992A_weight",
-        "date", "close", "ret_5d", "ret_20d", "ret_60d", "volume_ratio",
+        "date", "close_adj", "ret_5d", "ret_20d", "ret_60d", "volume_ratio",
         "ma5", "ma20", "ma60", "above_ma20", "dist_ma20_pct", "is_20d_high",
         "dif", "macd", "osc", "macd_cross_up", "osc_turn_positive"
     ]
