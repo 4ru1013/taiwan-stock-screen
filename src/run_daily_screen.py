@@ -1,7 +1,6 @@
 import os
 import pathlib
 from datetime import date, timedelta
-from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -15,6 +14,7 @@ ETF_SOURCES = {
 TAIEX_SYMBOL = "TAIEX"
 OUTPUT_DIR = pathlib.Path("output")
 RAW_DIR = pathlib.Path("data/raw")
+PREVIOUS_HOLDINGS_PATH = RAW_DIR / "etf_holdings_latest.csv"
 
 
 def ensure_dirs() -> None:
@@ -29,13 +29,32 @@ def normalize_code(code) -> str:
 def read_csv_from_url(url: str) -> pd.DataFrame:
     resp = requests.get(url, timeout=60)
     resp.raise_for_status()
-    # utf-8-sig handles BOM from Excel-friendly CSVs.
     from io import StringIO
 
     return pd.read_csv(StringIO(resp.text), dtype={"code": "string"})
 
 
+def load_previous_holding_codes() -> dict[str, set[str]]:
+    if not PREVIOUS_HOLDINGS_PATH.exists():
+        return {etf: set() for etf in ETF_SOURCES}
+    try:
+        prev = pd.read_csv(PREVIOUS_HOLDINGS_PATH, dtype={"code": "string"})
+    except Exception as exc:
+        print(f"[WARN] Failed to read previous holdings: {exc}")
+        return {etf: set() for etf in ETF_SOURCES}
+    required = {"etf_code", "code"}
+    if not required.issubset(set(prev.columns)):
+        print("[WARN] Previous holdings format invalid; new-holding flags disabled for this run.")
+        return {etf: set() for etf in ETF_SOURCES}
+    prev["code"] = prev["code"].map(normalize_code)
+    return {
+        etf: set(prev.loc[prev["etf_code"].astype(str) == etf, "code"].dropna().astype(str))
+        for etf in ETF_SOURCES
+    }
+
+
 def load_etf_holdings() -> pd.DataFrame:
+    previous_codes = load_previous_holding_codes()
     frames = []
     for etf_code, url in ETF_SOURCES.items():
         df = read_csv_from_url(url)
@@ -53,9 +72,12 @@ def load_etf_holdings() -> pd.DataFrame:
         df["etf_code"] = etf_code
         df["etf_rank"] = np.arange(1, len(df) + 1)
         df["is_top10"] = df["etf_rank"] <= 10
-        frames.append(df[["etf_code", "code", "name", "shares", "weight", "etf_rank", "is_top10"]])
+        prior = previous_codes.get(etf_code, set())
+        # First run: do not mark every holding as new.
+        df["is_new"] = False if not prior else ~df["code"].isin(prior)
+        frames.append(df[["etf_code", "code", "name", "shares", "weight", "etf_rank", "is_top10", "is_new"]])
     all_holdings = pd.concat(frames, ignore_index=True)
-    all_holdings.to_csv(RAW_DIR / "etf_holdings_latest.csv", index=False, encoding="utf-8-sig")
+    all_holdings.to_csv(PREVIOUS_HOLDINGS_PATH, index=False, encoding="utf-8-sig")
     return all_holdings
 
 
@@ -79,6 +101,8 @@ def build_candidate_pool(holdings: pd.DataFrame) -> pd.DataFrame:
             "00992A_rank": np.nan,
             "00981A_top10": False,
             "00992A_top10": False,
+            "00981A_new": False,
+            "00992A_new": False,
         }
         for _, r in g.iterrows():
             etf = r["etf_code"]
@@ -86,9 +110,13 @@ def build_candidate_pool(holdings: pd.DataFrame) -> pd.DataFrame:
             row[f"{etf}_weight"] = r["weight"]
             row[f"{etf}_rank"] = int(r["etf_rank"])
             row[f"{etf}_top10"] = bool(r["is_top10"])
+            row[f"{etf}_new"] = bool(r["is_new"])
         rows.append(row)
     pool = pd.DataFrame(rows)
-    pool = pool.sort_values(["etf_count", "00992A_top10", "00981A_top10", "00992A_weight", "00981A_shares"], ascending=[False, False, False, False, False]).reset_index(drop=True)
+    pool = pool.sort_values(
+        ["etf_count", "00992A_top10", "00981A_top10", "00992A_new", "00981A_new", "00992A_weight", "00981A_shares"],
+        ascending=[False, False, False, False, False, False, False],
+    ).reset_index(drop=True)
     pool.to_csv(OUTPUT_DIR / "candidate_pool.csv", index=False, encoding="utf-8-sig")
     return pool
 
@@ -119,7 +147,6 @@ def fetch_all_prices(pool: pd.DataFrame, days_back: int = 430) -> pd.DataFrame:
 
     frames = []
     ids = pool["code"].dropna().astype(str).unique().tolist()
-    # Add TAIEX benchmark for RS calculations.
     ids_with_benchmark = ids + [TAIEX_SYMBOL]
     for i, sid in enumerate(ids_with_benchmark, 1):
         print(f"[INFO] Fetch price {i}/{len(ids_with_benchmark)}: {sid}")
@@ -198,8 +225,7 @@ def build_indicators(prices: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
         "above_ma20", "dist_ma20_pct", "is_20d_high"
     ]
     latest = latest[keep_cols]
-    merged = pool.merge(latest, on="code", how="left")
-    return merged
+    return pool.merge(latest, on="code", how="left")
 
 
 def add_research_score(df: pd.DataFrame) -> pd.DataFrame:
@@ -207,12 +233,19 @@ def add_research_score(df: pd.DataFrame) -> pd.DataFrame:
     rs_component = out["rs_rank"].fillna(0)
     etf_component = out["etf_count"].fillna(0).clip(upper=2) / 2 * 100
     top10_component = ((out["00981A_top10"].fillna(False)) | (out["00992A_top10"].fillna(False))).astype(int) * 100
+    new_component = ((out["00981A_new"].fillna(False)) | (out["00992A_new"].fillna(False))).astype(int) * 100
     timing_component = (
         out["above_ma20"].fillna(False).astype(int) * 35
         + out["osc_turn_positive"].fillna(False).astype(int) * 35
         + out["macd_cross_up"].fillna(False).astype(int) * 30
     )
-    out["research_score"] = (0.45 * rs_component + 0.20 * etf_component + 0.20 * top10_component + 0.15 * timing_component).round(1)
+    out["research_score"] = (
+        0.40 * rs_component
+        + 0.15 * etf_component
+        + 0.20 * top10_component
+        + 0.10 * new_component
+        + 0.15 * timing_component
+    ).round(1)
     return out.sort_values(["research_score", "rs_rank", "etf_count"], ascending=[False, False, False]).reset_index(drop=True)
 
 
@@ -223,7 +256,8 @@ def export_excel(screen: pd.DataFrame, pool: pd.DataFrame, holdings: pd.DataFram
 
     watch_cols = [
         "code", "name", "research_score", "rs_rank", "rs20", "rs60", "etf_list", "etf_count",
-        "00981A_top10", "00992A_top10", "00981A_rank", "00992A_rank", "00992A_weight",
+        "00981A_top10", "00992A_top10", "00981A_new", "00992A_new",
+        "00981A_rank", "00992A_rank", "00992A_weight",
         "date", "close", "ret_5d", "ret_20d", "ret_60d", "volume_ratio",
         "ma5", "ma20", "ma60", "above_ma20", "dist_ma20_pct", "is_20d_high",
         "dif", "macd", "osc", "macd_cross_up", "osc_turn_positive"
@@ -236,7 +270,6 @@ def export_excel(screen: pd.DataFrame, pool: pd.DataFrame, holdings: pd.DataFram
         holdings.to_excel(writer, sheet_name="ETF_Holdings", index=False)
         screen.to_excel(writer, sheet_name="Full_Data", index=False)
 
-    # Also write stable latest file.
     with pd.ExcelWriter(latest_path, engine="openpyxl") as writer:
         screen[watch_cols].to_excel(writer, sheet_name="Ranking", index=False)
         pool.to_excel(writer, sheet_name="Candidate_Pool", index=False)
