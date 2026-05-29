@@ -1,6 +1,5 @@
-import os
 import pathlib
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -11,11 +10,11 @@ ETF_SOURCES = {
     "00992A": "https://github.com/4ru1013/capital-etf-00992a-portfolio/blob/main/data/out/00992A_latest.csv?raw=1",
 }
 
-FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 TAIEX_SYMBOL = "TAIEX"
 OUTPUT_DIR = pathlib.Path("output")
 RAW_DIR = pathlib.Path("data/raw")
 PREVIOUS_HOLDINGS_PATH = RAW_DIR / "etf_holdings_latest.csv"
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
 
 def ensure_dirs() -> None:
@@ -116,42 +115,62 @@ def build_candidate_pool(holdings: pd.DataFrame) -> pd.DataFrame:
     return pool
 
 
-def finmind_request(dataset: str, stock_id: str, start_date: str, end_date: str) -> pd.DataFrame:
+def yahoo_symbols_for_stock_id(stock_id: str) -> list[str]:
+    if stock_id == TAIEX_SYMBOL:
+        return ["^TWII"]
+    return [f"{stock_id}.TW", f"{stock_id}.TWO"]
+
+
+def fetch_yahoo_chart(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_dt = (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)).replace(tzinfo=timezone.utc)
     params = {
-        "dataset": dataset,
-        "data_id": stock_id,
-        "start_date": start_date,
-        "end_date": end_date,
+        "period1": int(start_dt.timestamp()),
+        "period2": int(end_dt.timestamp()),
+        "interval": "1d",
+        "events": "history",
+        "includeAdjustedClose": "true",
     }
-    token = os.getenv("FINMIND_TOKEN", "").strip()
-    if token:
-        params["token"] = token
-    resp = requests.get(FINMIND_API_URL, params=params, timeout=60)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(YAHOO_CHART_URL.format(symbol=symbol), params=params, headers=headers, timeout=60)
     resp.raise_for_status()
     payload = resp.json()
-    if not payload.get("data"):
+    error = payload.get("chart", {}).get("error")
+    if error:
+        raise RuntimeError(error)
+    result = payload.get("chart", {}).get("result") or []
+    if not result:
         return pd.DataFrame()
-    df = pd.DataFrame(payload["data"])
-    if "stock_id" not in df.columns:
-        df["stock_id"] = stock_id
-    df["stock_id"] = df["stock_id"].astype(str)
+    r = result[0]
+    ts = r.get("timestamp") or []
+    quote = (r.get("indicators", {}).get("quote") or [{}])[0]
+    adj = (r.get("indicators", {}).get("adjclose") or [{}])[0].get("adjclose") or []
+    if not ts or not adj:
+        return pd.DataFrame()
+    df = pd.DataFrame({
+        "date": [datetime.fromtimestamp(x, tz=timezone.utc).date().isoformat() for x in ts],
+        "close_adj": adj,
+        "close_raw": quote.get("close", [np.nan] * len(ts)),
+        "Trading_Volume": quote.get("volume", [np.nan] * len(ts)),
+    })
+    df = df.dropna(subset=["close_adj"])
     return df
 
 
 def fetch_stock_price(stock_id: str, start_date: str, end_date: str) -> pd.DataFrame:
-    # Stocks use adjusted prices for every technical calculation.
-    dataset = "TaiwanStockPrice" if stock_id == TAIEX_SYMBOL else "TaiwanStockPriceAdj"
-    df = finmind_request(dataset, stock_id, start_date, end_date)
-    if df.empty:
-        return pd.DataFrame()
-    # Standardize adjusted close column name. In TaiwanStockPriceAdj, close is adjusted close.
-    df = df.copy()
-    df["close_adj"] = pd.to_numeric(df["close"], errors="coerce")
-    if "Trading_Volume" in df.columns:
-        df["Trading_Volume"] = pd.to_numeric(df["Trading_Volume"], errors="coerce")
-    else:
-        df["Trading_Volume"] = np.nan
-    return df
+    errors = []
+    for symbol in yahoo_symbols_for_stock_id(stock_id):
+        try:
+            df = fetch_yahoo_chart(symbol, start_date, end_date)
+        except Exception as exc:
+            errors.append(f"{symbol}: {exc}")
+            continue
+        if not df.empty:
+            df["stock_id"] = stock_id
+            df["yahoo_symbol"] = symbol
+            return df
+    print(f"[WARN] Yahoo adjusted price failed for {stock_id}: {' | '.join(errors)}")
+    return pd.DataFrame()
 
 
 def fetch_all_prices(pool: pd.DataFrame, days_back: int = 430) -> pd.DataFrame:
@@ -165,19 +184,19 @@ def fetch_all_prices(pool: pd.DataFrame, days_back: int = 430) -> pd.DataFrame:
     ids_with_benchmark = ids + [TAIEX_SYMBOL]
     for i, sid in enumerate(ids_with_benchmark, 1):
         print(f"[INFO] Fetch adjusted price {i}/{len(ids_with_benchmark)}: {sid}")
-        try:
-            df = fetch_stock_price(sid, start_s, end_s)
-        except Exception as exc:
-            print(f"[WARN] Failed to fetch {sid}: {exc}")
-            continue
+        df = fetch_stock_price(sid, start_s, end_s)
         if df.empty:
-            print(f"[WARN] Empty price data: {sid}")
+            print(f"[WARN] Empty adjusted price data: {sid}")
             continue
         frames.append(df)
 
     if not frames:
-        raise RuntimeError("No price data fetched from FinMind.")
+        raise RuntimeError("No adjusted price data fetched.")
     prices = pd.concat(frames, ignore_index=True)
+    stock_count = prices.loc[prices["stock_id"] != TAIEX_SYMBOL, "stock_id"].nunique()
+    expected_count = len(ids)
+    if stock_count < max(1, int(expected_count * 0.8)):
+        raise RuntimeError(f"Adjusted price coverage too low: {stock_count}/{expected_count}")
     prices.to_csv(RAW_DIR / "price_data.csv", index=False, encoding="utf-8-sig")
     return prices
 
@@ -234,13 +253,17 @@ def build_indicators(prices: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
 
     latest = latest.rename(columns={"stock_id": "code"})
     keep_cols = [
-        "code", "date", "close_adj", "Trading_Volume", "ma5", "ma20", "ma60", "vol_ma20", "volume_ratio",
+        "code", "date", "yahoo_symbol", "close_raw", "close_adj", "Trading_Volume", "ma5", "ma20", "ma60", "vol_ma20", "volume_ratio",
         "ret_5d", "ret_20d", "ret_60d", "rs20", "rs60", "rs_accel", "rs_score", "rs_rank",
         "dif", "macd", "osc", "osc_prev", "macd_cross_up", "osc_turn_positive",
         "above_ma20", "dist_ma20_pct", "is_20d_high"
     ]
     latest = latest[keep_cols]
-    return pool.merge(latest, on="code", how="left")
+    merged = pool.merge(latest, on="code", how="left")
+    missing_price = merged["close_adj"].isna().sum()
+    if missing_price > 0:
+        print(f"[WARN] Missing adjusted price rows after merge: {missing_price}")
+    return merged
 
 
 def add_research_score(df: pd.DataFrame) -> pd.DataFrame:
@@ -275,7 +298,7 @@ def export_excel(screen: pd.DataFrame, pool: pd.DataFrame, holdings: pd.DataFram
         "code", "name", "research_score", "rs_rank", "rs20", "rs60", "rs_accel", "etf_list", "etf_count",
         "00981A_top10", "00992A_top10", "00981A_new", "00992A_new",
         "00981A_rank", "00992A_rank", "00992A_weight",
-        "date", "close_adj", "ret_5d", "ret_20d", "ret_60d", "volume_ratio",
+        "date", "yahoo_symbol", "close_raw", "close_adj", "ret_5d", "ret_20d", "ret_60d", "volume_ratio",
         "ma5", "ma20", "ma60", "above_ma20", "dist_ma20_pct", "is_20d_high",
         "dif", "macd", "osc", "macd_cross_up", "osc_turn_positive"
     ]
