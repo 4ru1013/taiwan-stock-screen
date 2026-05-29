@@ -1,0 +1,5 @@
+FinMind
+pandas
+numpy
+openpyxl
+requests
