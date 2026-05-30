@@ -1,20 +1,27 @@
 import pathlib
+import re
 from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
 import requests
 
-ETF_SOURCES = {
-    "00981A": "https://github.com/4ru1013/united-etf-00981a-portfolio/blob/main/data/out/00981A_latest.csv?raw=1",
-    "00992A": "https://github.com/4ru1013/capital-etf-00992a-portfolio/blob/main/data/out/00992A_latest.csv?raw=1",
+ETF_CONFIG = {
+    "00981A": {
+        "repo": "4ru1013/united-etf-00981a-portfolio",
+        "prefix": "00981A_holdings_",
+    },
+    "00992A": {
+        "repo": "4ru1013/capital-etf-00992a-portfolio",
+        "prefix": "00992A_holdings_",
+    },
 }
 
 TAIEX_SYMBOL = "TAIEX"
 OUTPUT_DIR = pathlib.Path("output")
 RAW_DIR = pathlib.Path("data/raw")
-PREVIOUS_HOLDINGS_PATH = RAW_DIR / "etf_holdings_latest.csv"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+GITHUB_CONTENTS_URL = "https://api.github.com/repos/{repo}/contents/data/out"
 
 
 def ensure_dirs() -> None:
@@ -27,62 +34,88 @@ def normalize_code(code) -> str:
 
 
 def read_csv_from_url(url: str) -> pd.DataFrame:
-    resp = requests.get(url, timeout=60)
+    resp = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
     resp.raise_for_status()
     from io import StringIO
     return pd.read_csv(StringIO(resp.text), dtype={"code": "string"})
 
 
-def load_previous_holdings() -> pd.DataFrame:
-    if not PREVIOUS_HOLDINGS_PATH.exists():
-        return pd.DataFrame(columns=["etf_code", "code", "shares", "etf_rank"])
-    try:
-        prev = pd.read_csv(PREVIOUS_HOLDINGS_PATH, dtype={"code": "string"})
-    except Exception as exc:
-        print(f"[WARN] Failed to read previous holdings: {exc}")
-        return pd.DataFrame(columns=["etf_code", "code", "shares", "etf_rank"])
-    required = {"etf_code", "code", "shares", "etf_rank"}
-    if not required.issubset(set(prev.columns)):
-        print("[WARN] Previous holdings format invalid; ETF flow disabled for this run.")
-        return pd.DataFrame(columns=["etf_code", "code", "shares", "etf_rank"])
-    prev = prev.copy()
-    prev["code"] = prev["code"].map(normalize_code)
-    prev["shares"] = pd.to_numeric(prev["shares"], errors="coerce").fillna(0).astype(int)
-    prev["etf_rank"] = pd.to_numeric(prev["etf_rank"], errors="coerce")
-    return prev
+def list_latest_two_holding_files(etf_code: str) -> tuple[dict, dict | None]:
+    cfg = ETF_CONFIG[etf_code]
+    resp = requests.get(GITHUB_CONTENTS_URL.format(repo=cfg["repo"]), timeout=60, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    items = resp.json()
+    pattern = re.compile(rf"^{re.escape(cfg['prefix'])}(\d{{8}})\.csv$")
+    matches = []
+    for item in items:
+        name = item.get("name", "")
+        m = pattern.match(name)
+        if not m:
+            continue
+        matches.append({
+            "date": m.group(1),
+            "name": name,
+            "download_url": item.get("download_url"),
+        })
+    matches = sorted(matches, key=lambda x: x["date"])
+    if not matches:
+        raise RuntimeError(f"No historical holdings files found for {etf_code}.")
+    latest = matches[-1]
+    previous = matches[-2] if len(matches) >= 2 else None
+    print(f"[INFO] {etf_code} latest holdings: {latest['name']}")
+    if previous:
+        print(f"[INFO] {etf_code} previous holdings: {previous['name']}")
+    else:
+        print(f"[WARN] {etf_code} has no previous holdings file; ETF flow disabled for this ETF.")
+    return latest, previous
+
+
+def normalize_holding_df(df: pd.DataFrame, etf_code: str, source_date: str, is_previous: bool = False) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    if "code" not in df.columns or "name" not in df.columns or "shares" not in df.columns:
+        raise ValueError(f"{etf_code} holdings columns invalid: {list(df.columns)}")
+    df["code"] = df["code"].map(normalize_code)
+    df["name"] = df["name"].astype(str).str.strip()
+    df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0).astype(int)
+    df["weight"] = pd.to_numeric(df["weight"], errors="coerce") if "weight" in df.columns else np.nan
+    df = df.sort_values(["weight", "shares"], ascending=[False, False]).reset_index(drop=True)
+    df["etf_code"] = etf_code
+    df["source_date"] = source_date
+    rank_col = "prev_rank" if is_previous else "etf_rank"
+    df[rank_col] = np.arange(1, len(df) + 1)
+    return df
+
+
+def load_one_etf_holdings(etf_code: str) -> pd.DataFrame:
+    latest_file, previous_file = list_latest_two_holding_files(etf_code)
+    latest_df = normalize_holding_df(read_csv_from_url(latest_file["download_url"]), etf_code, latest_file["date"])
+
+    if previous_file:
+        prev_df = normalize_holding_df(read_csv_from_url(previous_file["download_url"]), etf_code, previous_file["date"], is_previous=True)
+        prev_df = prev_df[["code", "shares", "prev_rank"]].rename(columns={"shares": "prev_shares"})
+    else:
+        prev_df = pd.DataFrame(columns=["code", "prev_shares", "prev_rank"])
+
+    latest_df = latest_df.merge(prev_df, on="code", how="left")
+    latest_df["prev_shares"] = latest_df["prev_shares"].fillna(0).astype(int)
+    latest_df["prev_rank"] = pd.to_numeric(latest_df["prev_rank"], errors="coerce")
+    latest_df["delta_shares"] = latest_df["shares"] - latest_df["prev_shares"]
+    latest_df["delta_pct"] = np.where(latest_df["prev_shares"] > 0, latest_df["delta_shares"] / latest_df["prev_shares"], np.nan)
+    latest_df["is_new"] = latest_df["prev_shares"].eq(0) & latest_df["shares"].gt(0)
+    latest_df["is_top10"] = latest_df["etf_rank"] <= 10
+    latest_df["latest_file"] = latest_file["name"]
+    latest_df["previous_file"] = previous_file["name"] if previous_file else ""
+    return latest_df[[
+        "etf_code", "source_date", "latest_file", "previous_file", "code", "name", "shares", "weight", "etf_rank",
+        "is_top10", "is_new", "prev_shares", "prev_rank", "delta_shares", "delta_pct"
+    ]]
 
 
 def load_etf_holdings() -> pd.DataFrame:
-    previous = load_previous_holdings()
-    frames = []
-    for etf_code, url in ETF_SOURCES.items():
-        df = read_csv_from_url(url)
-        df.columns = [str(c).strip().lower() for c in df.columns]
-        if "code" not in df.columns or "name" not in df.columns or "shares" not in df.columns:
-            raise ValueError(f"{etf_code} latest CSV columns invalid: {list(df.columns)}")
-        df["code"] = df["code"].map(normalize_code)
-        df["name"] = df["name"].astype(str).str.strip()
-        df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0).astype(int)
-        df["weight"] = pd.to_numeric(df["weight"], errors="coerce") if "weight" in df.columns else np.nan
-        df = df.sort_values(["weight", "shares"], ascending=[False, False]).reset_index(drop=True)
-        df["etf_code"] = etf_code
-        df["etf_rank"] = np.arange(1, len(df) + 1)
-        df["is_top10"] = df["etf_rank"] <= 10
-
-        prev_etf = previous[previous["etf_code"].astype(str) == etf_code][["code", "shares", "etf_rank"]].copy()
-        prev_etf = prev_etf.rename(columns={"shares": "prev_shares", "etf_rank": "prev_rank"})
-        df = df.merge(prev_etf, on="code", how="left")
-        df["prev_shares"] = df["prev_shares"].fillna(0).astype(int)
-        df["prev_rank"] = pd.to_numeric(df["prev_rank"], errors="coerce")
-        df["delta_shares"] = df["shares"] - df["prev_shares"]
-        df["delta_pct"] = np.where(df["prev_shares"] > 0, df["delta_shares"] / df["prev_shares"], np.nan)
-        df["is_new"] = df["prev_shares"].eq(0) & df["shares"].gt(0)
-        frames.append(df[[
-            "etf_code", "code", "name", "shares", "weight", "etf_rank", "is_top10", "is_new",
-            "prev_shares", "prev_rank", "delta_shares", "delta_pct"
-        ]])
+    frames = [load_one_etf_holdings(etf_code) for etf_code in ETF_CONFIG]
     all_holdings = pd.concat(frames, ignore_index=True)
-    all_holdings.to_csv(PREVIOUS_HOLDINGS_PATH, index=False, encoding="utf-8-sig")
+    all_holdings.to_csv(RAW_DIR / "etf_holdings_latest.csv", index=False, encoding="utf-8-sig")
     return all_holdings
 
 
@@ -99,8 +132,9 @@ def build_candidate_pool(holdings: pd.DataFrame) -> pd.DataFrame:
             "in_00981A": "00981A" in etfs,
             "in_00992A": "00992A" in etfs,
         }
-        for etf in ETF_SOURCES:
+        for etf in ETF_CONFIG:
             row.update({
+                f"{etf}_source_date": "",
                 f"{etf}_shares": 0,
                 f"{etf}_weight": np.nan,
                 f"{etf}_rank": np.nan,
@@ -115,6 +149,7 @@ def build_candidate_pool(holdings: pd.DataFrame) -> pd.DataFrame:
             })
         for _, r in g.iterrows():
             etf = r["etf_code"]
+            row[f"{etf}_source_date"] = str(r["source_date"])
             row[f"{etf}_shares"] = int(r["shares"])
             row[f"{etf}_weight"] = r["weight"]
             row[f"{etf}_rank"] = int(r["etf_rank"])
@@ -252,8 +287,6 @@ def find_ma20_upturn_price(close_values: pd.Series, current_close: float):
     ma20 = close_values.rolling(20).mean()
     if len(ma20) >= 2 and ma20.iloc[-1] > ma20.iloc[-2]:
         return "Already Upturn"
-    # Tomorrow MA20 > today's MA20.
-    # mean(last 19 closes + next_close) > mean(last 20 closes)
     today_ma20 = float(ma20.iloc[-1])
     last_19_sum = float(close_values.iloc[-19:].sum())
     required = today_ma20 * 20 - last_19_sum
@@ -337,7 +370,7 @@ def build_indicators(prices: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
 
 def add_flow_ranks(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    for etf in ETF_SOURCES:
+    for etf in ETF_CONFIG:
         value_col = f"{etf}_flow_value"
         out[value_col] = out[f"{etf}_delta_shares"].fillna(0) * out["close_adj"]
         buy_mask = out[value_col] > 0
@@ -367,7 +400,7 @@ def make_etf_tag(row) -> str:
     tags = []
     if row.get("etf_count", 0) >= 2:
         tags.append("Dual ETF")
-    for etf in ETF_SOURCES:
+    for etf in ETF_CONFIG:
         if bool(row.get(f"{etf}_top10", False)):
             tags.append(f"{etf} Top10")
         if bool(row.get(f"{etf}_new", False)):
@@ -420,7 +453,7 @@ def export_excel(screen: pd.DataFrame, pool: pd.DataFrame, holdings: pd.DataFram
         "code", "name", "setup", "etf_tag", "market_tag", "trading_score",
         "rs20_rank", "rs_accel", "close_adj", "osc_flip_price", "ma20_upturn_price",
         "ma20_gt_ma60", "close_gt_ma60", "dif", "macd", "osc",
-        "00981A_rank", "00992A_rank", "00981A_weight", "00992A_weight",
+        "00981A_source_date", "00992A_source_date", "00981A_rank", "00992A_rank", "00981A_weight", "00992A_weight",
         "00981A_delta_shares", "00981A_flow_value", "00981A_buy_flow_rank", "00981A_sell_flow_rank",
         "00992A_delta_shares", "00992A_flow_value", "00992A_buy_flow_rank", "00992A_sell_flow_rank",
         "date", "yahoo_symbol", "close_raw", "ret_5d", "ret_20d", "ret_60d", "volume_ratio",
