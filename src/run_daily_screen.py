@@ -33,26 +33,27 @@ def read_csv_from_url(url: str) -> pd.DataFrame:
     return pd.read_csv(StringIO(resp.text), dtype={"code": "string"})
 
 
-def load_previous_holding_codes() -> dict[str, set[str]]:
+def load_previous_holdings() -> pd.DataFrame:
     if not PREVIOUS_HOLDINGS_PATH.exists():
-        return {etf: set() for etf in ETF_SOURCES}
+        return pd.DataFrame(columns=["etf_code", "code", "shares", "etf_rank"])
     try:
         prev = pd.read_csv(PREVIOUS_HOLDINGS_PATH, dtype={"code": "string"})
     except Exception as exc:
         print(f"[WARN] Failed to read previous holdings: {exc}")
-        return {etf: set() for etf in ETF_SOURCES}
-    if not {"etf_code", "code"}.issubset(set(prev.columns)):
-        print("[WARN] Previous holdings format invalid; new-holding flags disabled for this run.")
-        return {etf: set() for etf in ETF_SOURCES}
+        return pd.DataFrame(columns=["etf_code", "code", "shares", "etf_rank"])
+    required = {"etf_code", "code", "shares", "etf_rank"}
+    if not required.issubset(set(prev.columns)):
+        print("[WARN] Previous holdings format invalid; ETF flow disabled for this run.")
+        return pd.DataFrame(columns=["etf_code", "code", "shares", "etf_rank"])
+    prev = prev.copy()
     prev["code"] = prev["code"].map(normalize_code)
-    return {
-        etf: set(prev.loc[prev["etf_code"].astype(str) == etf, "code"].dropna().astype(str))
-        for etf in ETF_SOURCES
-    }
+    prev["shares"] = pd.to_numeric(prev["shares"], errors="coerce").fillna(0).astype(int)
+    prev["etf_rank"] = pd.to_numeric(prev["etf_rank"], errors="coerce")
+    return prev
 
 
 def load_etf_holdings() -> pd.DataFrame:
-    previous_codes = load_previous_holding_codes()
+    previous = load_previous_holdings()
     frames = []
     for etf_code, url in ETF_SOURCES.items():
         df = read_csv_from_url(url)
@@ -67,9 +68,19 @@ def load_etf_holdings() -> pd.DataFrame:
         df["etf_code"] = etf_code
         df["etf_rank"] = np.arange(1, len(df) + 1)
         df["is_top10"] = df["etf_rank"] <= 10
-        prior = previous_codes.get(etf_code, set())
-        df["is_new"] = False if not prior else ~df["code"].isin(prior)
-        frames.append(df[["etf_code", "code", "name", "shares", "weight", "etf_rank", "is_top10", "is_new"]])
+
+        prev_etf = previous[previous["etf_code"].astype(str) == etf_code][["code", "shares", "etf_rank"]].copy()
+        prev_etf = prev_etf.rename(columns={"shares": "prev_shares", "etf_rank": "prev_rank"})
+        df = df.merge(prev_etf, on="code", how="left")
+        df["prev_shares"] = df["prev_shares"].fillna(0).astype(int)
+        df["prev_rank"] = pd.to_numeric(df["prev_rank"], errors="coerce")
+        df["delta_shares"] = df["shares"] - df["prev_shares"]
+        df["delta_pct"] = np.where(df["prev_shares"] > 0, df["delta_shares"] / df["prev_shares"], np.nan)
+        df["is_new"] = df["prev_shares"].eq(0) & df["shares"].gt(0)
+        frames.append(df[[
+            "etf_code", "code", "name", "shares", "weight", "etf_rank", "is_top10", "is_new",
+            "prev_shares", "prev_rank", "delta_shares", "delta_pct"
+        ]])
     all_holdings = pd.concat(frames, ignore_index=True)
     all_holdings.to_csv(PREVIOUS_HOLDINGS_PATH, index=False, encoding="utf-8-sig")
     return all_holdings
@@ -87,17 +98,21 @@ def build_candidate_pool(holdings: pd.DataFrame) -> pd.DataFrame:
             "etf_count": len(etfs),
             "in_00981A": "00981A" in etfs,
             "in_00992A": "00992A" in etfs,
-            "00981A_shares": 0,
-            "00992A_shares": 0,
-            "00981A_weight": np.nan,
-            "00992A_weight": np.nan,
-            "00981A_rank": np.nan,
-            "00992A_rank": np.nan,
-            "00981A_top10": False,
-            "00992A_top10": False,
-            "00981A_new": False,
-            "00992A_new": False,
         }
+        for etf in ETF_SOURCES:
+            row.update({
+                f"{etf}_shares": 0,
+                f"{etf}_weight": np.nan,
+                f"{etf}_rank": np.nan,
+                f"{etf}_top10": False,
+                f"{etf}_new": False,
+                f"{etf}_prev_shares": 0,
+                f"{etf}_delta_shares": 0,
+                f"{etf}_delta_pct": np.nan,
+                f"{etf}_flow_value": np.nan,
+                f"{etf}_buy_flow_rank": np.nan,
+                f"{etf}_sell_flow_rank": np.nan,
+            })
         for _, r in g.iterrows():
             etf = r["etf_code"]
             row[f"{etf}_shares"] = int(r["shares"])
@@ -105,6 +120,9 @@ def build_candidate_pool(holdings: pd.DataFrame) -> pd.DataFrame:
             row[f"{etf}_rank"] = int(r["etf_rank"])
             row[f"{etf}_top10"] = bool(r["is_top10"])
             row[f"{etf}_new"] = bool(r["is_new"])
+            row[f"{etf}_prev_shares"] = int(r["prev_shares"])
+            row[f"{etf}_delta_shares"] = int(r["delta_shares"])
+            row[f"{etf}_delta_pct"] = r["delta_pct"]
         rows.append(row)
     pool = pd.DataFrame(rows)
     pool = pool.sort_values(
@@ -201,6 +219,47 @@ def fetch_all_prices(pool: pd.DataFrame, days_back: int = 430) -> pd.DataFrame:
     return prices
 
 
+def calc_next_day_osc(close_values: pd.Series, next_close: float) -> float:
+    series = pd.concat([close_values, pd.Series([next_close])], ignore_index=True)
+    ema8 = series.ewm(span=8, adjust=False).mean()
+    ema17 = series.ewm(span=17, adjust=False).mean()
+    dif = ema8 - ema17
+    macd = dif.ewm(span=9, adjust=False).mean()
+    return float((dif - macd).iloc[-1])
+
+
+def find_osc_flip_price(close_values: pd.Series, current_close: float, current_osc: float):
+    if pd.isna(current_osc) or pd.isna(current_close):
+        return np.nan
+    if current_osc > 0:
+        return "Already Positive"
+    low = float(current_close)
+    high = float(current_close) * 1.15
+    if calc_next_day_osc(close_values, high) <= 0:
+        return np.nan
+    for _ in range(30):
+        mid = (low + high) / 2
+        if calc_next_day_osc(close_values, mid) > 0:
+            high = mid
+        else:
+            low = mid
+    return round(high, 2)
+
+
+def find_ma20_upturn_price(close_values: pd.Series, current_close: float):
+    if len(close_values) < 20 or pd.isna(current_close):
+        return np.nan
+    ma20 = close_values.rolling(20).mean()
+    if len(ma20) >= 2 and ma20.iloc[-1] > ma20.iloc[-2]:
+        return "Already Upturn"
+    # Tomorrow MA20 > today's MA20.
+    # mean(last 19 closes + next_close) > mean(last 20 closes)
+    today_ma20 = float(ma20.iloc[-1])
+    last_19_sum = float(close_values.iloc[-19:].sum())
+    required = today_ma20 * 20 - last_19_sum
+    return round(max(required + 0.01, float(current_close)), 2)
+
+
 def add_indicators_for_one(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values("date").copy()
     close = pd.to_numeric(df["close_adj"], errors="coerce")
@@ -224,9 +283,18 @@ def add_indicators_for_one(df: pd.DataFrame) -> pd.DataFrame:
     df["macd_cross_up"] = (df["dif"] > df["macd"]) & (df["dif"].shift(1) <= df["macd"].shift(1))
     df["osc_turn_positive"] = (df["osc"] > 0) & (df["osc_prev"] <= 0)
     df["above_ma20"] = close > df["ma20"]
+    df["ma20_gt_ma60"] = df["ma20"] > df["ma60"]
+    df["close_gt_ma60"] = close > df["ma60"]
     df["dist_ma20_pct"] = close / df["ma20"] - 1
     df["high_20d"] = close.rolling(20).max()
     df["is_20d_high"] = close >= df["high_20d"]
+
+    if not df.empty:
+        idx = df.index[-1]
+        cur_close = float(close.iloc[-1]) if not pd.isna(close.iloc[-1]) else np.nan
+        cur_osc = float(df["osc"].iloc[-1]) if not pd.isna(df["osc"].iloc[-1]) else np.nan
+        df.loc[idx, "osc_flip_price"] = find_osc_flip_price(close.dropna().reset_index(drop=True), cur_close, cur_osc)
+        df.loc[idx, "ma20_upturn_price"] = find_ma20_upturn_price(close.dropna().reset_index(drop=True), cur_close)
     return df
 
 
@@ -240,8 +308,7 @@ def build_indicators(prices: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
         raise RuntimeError("Missing TAIEX benchmark; cannot calculate RS.")
     bench_ret20 = float(bench["ret_20d"].iloc[0])
     bench_ret60 = float(bench["ret_60d"].iloc[0])
-    bench_date = str(bench["date"].iloc[0])
-    print(f"[INFO] Benchmark latest date: {bench_date}, ret20={bench_ret20:.4f}, ret60={bench_ret60:.4f}")
+    print(f"[INFO] Benchmark latest date: {bench['date'].iloc[0]}, ret20={bench_ret20:.4f}, ret60={bench_ret60:.4f}")
 
     latest = latest[latest["stock_id"] != TAIEX_SYMBOL].copy()
     latest["rs20"] = latest["ret_20d"] - bench_ret20
@@ -250,13 +317,15 @@ def build_indicators(prices: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
     latest["rs_score"] = 0.7 * latest["rs20"] + 0.3 * latest["rs_accel"]
     latest["rs_rank"] = latest["rs_score"].rank(pct=True, ascending=True) * 100
     latest["rs_rank"] = latest["rs_rank"].round(1)
+    latest["rs20_rank"] = latest["rs20"].rank(pct=True, ascending=True) * 100
+    latest["rs20_rank"] = latest["rs20_rank"].round(1)
 
     latest = latest.rename(columns={"stock_id": "code"})
     keep_cols = [
         "code", "date", "yahoo_symbol", "close_raw", "close_adj", "Trading_Volume", "ma5", "ma20", "ma60", "vol_ma20", "volume_ratio",
-        "ret_5d", "ret_20d", "ret_60d", "rs20", "rs60", "rs_accel", "rs_score", "rs_rank",
+        "ret_5d", "ret_20d", "ret_60d", "rs20", "rs60", "rs_accel", "rs_score", "rs_rank", "rs20_rank",
         "dif", "macd", "osc", "osc_prev", "macd_cross_up", "osc_turn_positive",
-        "above_ma20", "dist_ma20_pct", "is_20d_high"
+        "above_ma20", "ma20_gt_ma60", "close_gt_ma60", "dist_ma20_pct", "is_20d_high", "osc_flip_price", "ma20_upturn_price"
     ]
     latest = latest[keep_cols]
     merged = pool.merge(latest, on="code", how="left")
@@ -266,27 +335,80 @@ def build_indicators(prices: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
     return merged
 
 
-def add_research_score(df: pd.DataFrame) -> pd.DataFrame:
+def add_flow_ranks(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    rs_component = out["rs_rank"].fillna(0)
-    accel_component = out["rs_accel"].fillna(0).rank(pct=True, ascending=True) * 100
-    etf_component = out["etf_count"].fillna(0).clip(upper=2) / 2 * 100
-    top10_component = ((out["00981A_top10"].fillna(False)) | (out["00992A_top10"].fillna(False))).astype(int) * 100
-    new_component = ((out["00981A_new"].fillna(False)) | (out["00992A_new"].fillna(False))).astype(int) * 100
-    timing_component = (
-        out["above_ma20"].fillna(False).astype(int) * 35
-        + out["osc_turn_positive"].fillna(False).astype(int) * 35
-        + out["macd_cross_up"].fillna(False).astype(int) * 30
+    for etf in ETF_SOURCES:
+        value_col = f"{etf}_flow_value"
+        out[value_col] = out[f"{etf}_delta_shares"].fillna(0) * out["close_adj"]
+        buy_mask = out[value_col] > 0
+        sell_mask = out[value_col] < 0
+        out[f"{etf}_buy_flow_rank"] = np.nan
+        out[f"{etf}_sell_flow_rank"] = np.nan
+        if buy_mask.any():
+            out.loc[buy_mask, f"{etf}_buy_flow_rank"] = out.loc[buy_mask, value_col].rank(ascending=False, method="min")
+        if sell_mask.any():
+            out.loc[sell_mask, f"{etf}_sell_flow_rank"] = (-out.loc[sell_mask, value_col]).rank(ascending=False, method="min")
+    return out
+
+
+def make_setup(row) -> str:
+    if not bool(row.get("ma20_gt_ma60", False)) or not bool(row.get("close_gt_ma60", False)):
+        return "D"
+    if pd.notna(row.get("osc")) and row.get("osc") > 0:
+        return "A"
+    flip = row.get("osc_flip_price")
+    close = row.get("close_adj")
+    if isinstance(flip, (int, float, np.floating)) and pd.notna(flip) and pd.notna(close) and flip <= close * 1.05:
+        return "B"
+    return "C"
+
+
+def make_etf_tag(row) -> str:
+    tags = []
+    if row.get("etf_count", 0) >= 2:
+        tags.append("Dual ETF")
+    for etf in ETF_SOURCES:
+        if bool(row.get(f"{etf}_top10", False)):
+            tags.append(f"{etf} Top10")
+        if bool(row.get(f"{etf}_new", False)):
+            tags.append(f"{etf} New Entry")
+        buy_rank = row.get(f"{etf}_buy_flow_rank")
+        sell_rank = row.get(f"{etf}_sell_flow_rank")
+        if pd.notna(buy_rank) and buy_rank <= 10:
+            tags.append(f"{etf} Heavy Buy")
+        if pd.notna(sell_rank) and sell_rank <= 10:
+            tags.append(f"{etf} Heavy Sell")
+    return " | ".join(tags)
+
+
+def make_market_tag(row) -> str:
+    tags = []
+    if pd.notna(row.get("rs20_rank")) and row.get("rs20_rank") >= 80:
+        tags.append("Leader")
+    if pd.notna(row.get("rs_accel")):
+        if row.get("rs_accel") > 0:
+            tags.append("Accelerating")
+        elif row.get("rs_accel") < 0:
+            tags.append("Decelerating")
+    return " | ".join(tags)
+
+
+def add_strategy_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = add_flow_ranks(df)
+    out["setup"] = out.apply(make_setup, axis=1)
+    out["etf_tag"] = out.apply(make_etf_tag, axis=1)
+    out["market_tag"] = out.apply(make_market_tag, axis=1)
+
+    timing_map = {"A": 100, "B": 90, "C": 55, "D": 0}
+    timing_component = out["setup"].map(timing_map).fillna(0)
+    market_component = (0.7 * out["rs20_rank"].fillna(0)) + (0.3 * out["rs_accel"].fillna(0).rank(pct=True, ascending=True) * 100)
+    etf_component = (
+        (out["etf_count"].fillna(0).clip(upper=2) / 2 * 40)
+        + (((out["00981A_top10"].fillna(False)) | (out["00992A_top10"].fillna(False))).astype(int) * 30)
+        + (((out["00981A_buy_flow_rank"].fillna(999) <= 10) | (out["00992A_buy_flow_rank"].fillna(999) <= 10)).astype(int) * 30)
     )
-    out["research_score"] = (
-        0.35 * rs_component
-        + 0.15 * accel_component
-        + 0.15 * etf_component
-        + 0.15 * top10_component
-        + 0.10 * new_component
-        + 0.10 * timing_component
-    ).round(1)
-    return out.sort_values(["research_score", "rs_rank", "etf_count"], ascending=[False, False, False]).reset_index(drop=True)
+    out["trading_score"] = (0.60 * timing_component + 0.30 * market_component + 0.10 * etf_component).round(1)
+    return out.sort_values(["setup", "trading_score", "rs20_rank"], ascending=[True, False, False]).reset_index(drop=True)
 
 
 def export_excel(screen: pd.DataFrame, pool: pd.DataFrame, holdings: pd.DataFrame) -> pathlib.Path:
@@ -294,24 +416,26 @@ def export_excel(screen: pd.DataFrame, pool: pd.DataFrame, holdings: pd.DataFram
     out_path = OUTPUT_DIR / f"daily_screen_{today}.xlsx"
     latest_path = OUTPUT_DIR / "daily_screen_latest.xlsx"
 
-    watch_cols = [
-        "code", "name", "research_score", "rs_rank", "rs20", "rs60", "rs_accel", "etf_list", "etf_count",
-        "00981A_top10", "00992A_top10", "00981A_new", "00992A_new",
-        "00981A_rank", "00992A_rank", "00992A_weight",
-        "date", "yahoo_symbol", "close_raw", "close_adj", "ret_5d", "ret_20d", "ret_60d", "volume_ratio",
-        "ma5", "ma20", "ma60", "above_ma20", "dist_ma20_pct", "is_20d_high",
-        "dif", "macd", "osc", "macd_cross_up", "osc_turn_positive"
+    ranking_cols = [
+        "code", "name", "setup", "etf_tag", "market_tag", "trading_score",
+        "rs20_rank", "rs_accel", "close_adj", "osc_flip_price", "ma20_upturn_price",
+        "ma20_gt_ma60", "close_gt_ma60", "dif", "macd", "osc",
+        "00981A_rank", "00992A_rank", "00981A_weight", "00992A_weight",
+        "00981A_delta_shares", "00981A_flow_value", "00981A_buy_flow_rank", "00981A_sell_flow_rank",
+        "00992A_delta_shares", "00992A_flow_value", "00992A_buy_flow_rank", "00992A_sell_flow_rank",
+        "date", "yahoo_symbol", "close_raw", "ret_5d", "ret_20d", "ret_60d", "volume_ratio",
+        "ma5", "ma20", "ma60", "is_20d_high"
     ]
-    watch_cols = [c for c in watch_cols if c in screen.columns]
+    ranking_cols = [c for c in ranking_cols if c in screen.columns]
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        screen[watch_cols].to_excel(writer, sheet_name="Ranking", index=False)
+        screen[ranking_cols].to_excel(writer, sheet_name="Ranking", index=False)
         pool.to_excel(writer, sheet_name="Candidate_Pool", index=False)
         holdings.to_excel(writer, sheet_name="ETF_Holdings", index=False)
         screen.to_excel(writer, sheet_name="Full_Data", index=False)
 
     with pd.ExcelWriter(latest_path, engine="openpyxl") as writer:
-        screen[watch_cols].to_excel(writer, sheet_name="Ranking", index=False)
+        screen[ranking_cols].to_excel(writer, sheet_name="Ranking", index=False)
         pool.to_excel(writer, sheet_name="Candidate_Pool", index=False)
         holdings.to_excel(writer, sheet_name="ETF_Holdings", index=False)
         screen.to_excel(writer, sheet_name="Full_Data", index=False)
@@ -328,7 +452,7 @@ def main() -> None:
     pool = build_candidate_pool(holdings)
     prices = fetch_all_prices(pool)
     screen = build_indicators(prices, pool)
-    screen = add_research_score(screen)
+    screen = add_strategy_columns(screen)
     export_excel(screen, pool, holdings)
 
 
