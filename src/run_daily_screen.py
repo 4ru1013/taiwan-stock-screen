@@ -306,6 +306,7 @@ def add_indicators_for_one(df: pd.DataFrame) -> pd.DataFrame:
     df["macd"] = df["dif"].ewm(span=9, adjust=False).mean()
     df["osc"] = df["dif"] - df["macd"]
     df["osc_prev"] = df["osc"].shift(1)
+    df["osc_expanding"] = df["osc"] > df["osc_prev"]
     df["macd_cross_up"] = (df["dif"] > df["macd"]) & (df["dif"].shift(1) <= df["macd"].shift(1))
     df["osc_turn_positive"] = (df["osc"] > 0) & (df["osc_prev"] <= 0)
     df["above_ma20"] = close > df["ma20"]
@@ -350,7 +351,7 @@ def build_indicators(prices: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
     keep_cols = [
         "code", "date", "yahoo_symbol", "close_raw", "close_adj", "Trading_Volume", "ma5", "ma20", "ma60", "vol_ma20", "volume_ratio",
         "ret_5d", "ret_20d", "ret_60d", "rs20", "rs60", "rs_accel", "rs_score", "rs_rank", "rs20_rank",
-        "dif", "macd", "osc", "osc_prev", "macd_cross_up", "osc_turn_positive",
+        "dif", "macd", "osc", "osc_prev", "osc_expanding", "macd_cross_up", "osc_turn_positive",
         "above_ma20", "ma20_gt_ma60", "close_gt_ma60", "dist_ma20_pct", "is_20d_high", "osc_flip_price", "ma20_upturn_price"
     ]
     latest = latest[keep_cols]
@@ -379,11 +380,12 @@ def add_flow_ranks(df: pd.DataFrame) -> pd.DataFrame:
 def make_setup(row) -> str:
     if not bool(row.get("ma20_gt_ma60", False)) or not bool(row.get("close_gt_ma60", False)):
         return "D"
-    if pd.notna(row.get("osc")) and row.get("osc") > 0:
+    osc_expanding = bool(row.get("osc_expanding", False))
+    if pd.notna(row.get("osc")) and row.get("osc") > 0 and osc_expanding:
         return "A"
     flip = row.get("osc_flip_price")
     close = row.get("close_adj")
-    if isinstance(flip, (int, float, np.floating)) and pd.notna(flip) and pd.notna(close) and flip <= close * 1.05:
+    if osc_expanding and isinstance(flip, (int, float, np.floating)) and pd.notna(flip) and pd.notna(close) and flip <= close * 1.05:
         return "B"
     return "C"
 
@@ -412,6 +414,8 @@ def make_market_tag(row) -> str:
             tags.append("Accelerating")
         elif row.get("rs_accel") < 0:
             tags.append("Decelerating")
+    if pd.notna(row.get("osc")) and pd.notna(row.get("osc_prev")) and not bool(row.get("osc_expanding", False)):
+        tags.append("OSC Decelerating")
     return " | ".join(tags)
 
 
@@ -441,7 +445,7 @@ def export_excel(screen: pd.DataFrame, pool: pd.DataFrame, holdings: pd.DataFram
     ranking_cols = [
         "code", "name", "setup", "etf_tag", "market_tag", "trading_score",
         "rs20_rank", "rs_accel", "close_adj", "osc_flip_price", "ma20_upturn_price",
-        "ma20_gt_ma60", "close_gt_ma60", "dif", "macd", "osc",
+        "ma20_gt_ma60", "close_gt_ma60", "dif", "macd", "osc", "osc_prev", "osc_expanding",
         "00981A_source_date", "00981A_rank", "00981A_weight", "00981A_top10", "00981A_new",
         "00981A_delta_shares", "00981A_flow_value", "00981A_buy_flow_rank", "00981A_sell_flow_rank",
         "date", "yahoo_symbol", "close_raw", "ret_5d", "ret_20d", "ret_60d", "volume_ratio",
