@@ -26,6 +26,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install tqdm
+          pip install tabulate
 
       - name: Run daily screen
         env:
@@ -39,5 +40,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add output/ data/
-          git commit -m 'Update daily stock screen' || echo 'No changes'
+          git commit -m "Update daily stock screen" || echo "No changes"
           git push
