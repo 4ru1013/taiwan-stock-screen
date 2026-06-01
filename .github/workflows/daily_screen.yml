@@ -32,6 +32,7 @@ jobs:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: |
           python src/run_daily_screen.py
+          python src/generate_daily_report.py
 
       - name: Commit outputs
         run: |
