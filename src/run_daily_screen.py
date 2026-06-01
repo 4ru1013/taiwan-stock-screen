@@ -11,12 +11,9 @@ ETF_CONFIG = {
         "repo": "4ru1013/united-etf-00981a-portfolio",
         "prefix": "00981A_holdings_",
     },
-    "00992A": {
-        "repo": "4ru1013/capital-etf-00992a-portfolio",
-        "prefix": "00992A_holdings_",
-    },
 }
 
+PRIMARY_ETF = "00981A"
 TAIEX_SYMBOL = "TAIEX"
 OUTPUT_DIR = pathlib.Path("output")
 RAW_DIR = pathlib.Path("data/raw")
@@ -129,40 +126,36 @@ def build_candidate_pool(holdings: pd.DataFrame) -> pd.DataFrame:
             "name": name,
             "etf_list": "+".join(etfs),
             "etf_count": len(etfs),
-            "in_00981A": "00981A" in etfs,
-            "in_00992A": "00992A" in etfs,
+            "in_00981A": PRIMARY_ETF in etfs,
+            "00981A_source_date": "",
+            "00981A_shares": 0,
+            "00981A_weight": np.nan,
+            "00981A_rank": np.nan,
+            "00981A_top10": False,
+            "00981A_new": False,
+            "00981A_prev_shares": 0,
+            "00981A_delta_shares": 0,
+            "00981A_delta_pct": np.nan,
+            "00981A_flow_value": np.nan,
+            "00981A_buy_flow_rank": np.nan,
+            "00981A_sell_flow_rank": np.nan,
         }
-        for etf in ETF_CONFIG:
-            row.update({
-                f"{etf}_source_date": "",
-                f"{etf}_shares": 0,
-                f"{etf}_weight": np.nan,
-                f"{etf}_rank": np.nan,
-                f"{etf}_top10": False,
-                f"{etf}_new": False,
-                f"{etf}_prev_shares": 0,
-                f"{etf}_delta_shares": 0,
-                f"{etf}_delta_pct": np.nan,
-                f"{etf}_flow_value": np.nan,
-                f"{etf}_buy_flow_rank": np.nan,
-                f"{etf}_sell_flow_rank": np.nan,
-            })
-        for _, r in g.iterrows():
-            etf = r["etf_code"]
-            row[f"{etf}_source_date"] = str(r["source_date"])
-            row[f"{etf}_shares"] = int(r["shares"])
-            row[f"{etf}_weight"] = r["weight"]
-            row[f"{etf}_rank"] = int(r["etf_rank"])
-            row[f"{etf}_top10"] = bool(r["is_top10"])
-            row[f"{etf}_new"] = bool(r["is_new"])
-            row[f"{etf}_prev_shares"] = int(r["prev_shares"])
-            row[f"{etf}_delta_shares"] = int(r["delta_shares"])
-            row[f"{etf}_delta_pct"] = r["delta_pct"]
+        r = g[g["etf_code"] == PRIMARY_ETF].iloc[0]
+        row["00981A_source_date"] = str(r["source_date"])
+        row["00981A_shares"] = int(r["shares"])
+        row["00981A_weight"] = r["weight"]
+        row["00981A_rank"] = int(r["etf_rank"])
+        row["00981A_top10"] = bool(r["is_top10"])
+        row["00981A_new"] = bool(r["is_new"])
+        row["00981A_prev_shares"] = int(r["prev_shares"])
+        row["00981A_delta_shares"] = int(r["delta_shares"])
+        row["00981A_delta_pct"] = r["delta_pct"]
         rows.append(row)
+
     pool = pd.DataFrame(rows)
     pool = pool.sort_values(
-        ["etf_count", "00992A_top10", "00981A_top10", "00992A_new", "00981A_new", "00992A_weight", "00981A_shares"],
-        ascending=[False, False, False, False, False, False, False],
+        ["00981A_top10", "00981A_new", "00981A_shares", "00981A_delta_shares"],
+        ascending=[False, False, False, False],
     ).reset_index(drop=True)
     pool.to_csv(OUTPUT_DIR / "candidate_pool.csv", index=False, encoding="utf-8-sig")
     return pool
@@ -370,17 +363,16 @@ def build_indicators(prices: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
 
 def add_flow_ranks(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    for etf in ETF_CONFIG:
-        value_col = f"{etf}_flow_value"
-        out[value_col] = out[f"{etf}_delta_shares"].fillna(0) * out["close_adj"]
-        buy_mask = out[value_col] > 0
-        sell_mask = out[value_col] < 0
-        out[f"{etf}_buy_flow_rank"] = np.nan
-        out[f"{etf}_sell_flow_rank"] = np.nan
-        if buy_mask.any():
-            out.loc[buy_mask, f"{etf}_buy_flow_rank"] = out.loc[buy_mask, value_col].rank(ascending=False, method="min")
-        if sell_mask.any():
-            out.loc[sell_mask, f"{etf}_sell_flow_rank"] = (-out.loc[sell_mask, value_col]).rank(ascending=False, method="min")
+    value_col = "00981A_flow_value"
+    out[value_col] = out["00981A_delta_shares"].fillna(0) * out["close_adj"]
+    buy_mask = out[value_col] > 0
+    sell_mask = out[value_col] < 0
+    out["00981A_buy_flow_rank"] = np.nan
+    out["00981A_sell_flow_rank"] = np.nan
+    if buy_mask.any():
+        out.loc[buy_mask, "00981A_buy_flow_rank"] = out.loc[buy_mask, value_col].rank(ascending=False, method="min")
+    if sell_mask.any():
+        out.loc[sell_mask, "00981A_sell_flow_rank"] = (-out.loc[sell_mask, value_col]).rank(ascending=False, method="min")
     return out
 
 
@@ -398,19 +390,16 @@ def make_setup(row) -> str:
 
 def make_etf_tag(row) -> str:
     tags = []
-    if row.get("etf_count", 0) >= 2:
-        tags.append("Dual ETF")
-    for etf in ETF_CONFIG:
-        if bool(row.get(f"{etf}_top10", False)):
-            tags.append(f"{etf} Top10")
-        if bool(row.get(f"{etf}_new", False)):
-            tags.append(f"{etf} New Entry")
-        buy_rank = row.get(f"{etf}_buy_flow_rank")
-        sell_rank = row.get(f"{etf}_sell_flow_rank")
-        if pd.notna(buy_rank) and buy_rank <= 10:
-            tags.append(f"{etf} Heavy Buy")
-        if pd.notna(sell_rank) and sell_rank <= 10:
-            tags.append(f"{etf} Heavy Sell")
+    if bool(row.get("00981A_top10", False)):
+        tags.append("00981A Top10")
+    if bool(row.get("00981A_new", False)):
+        tags.append("00981A New Entry")
+    buy_rank = row.get("00981A_buy_flow_rank")
+    sell_rank = row.get("00981A_sell_flow_rank")
+    if pd.notna(buy_rank) and buy_rank <= 10:
+        tags.append("00981A Heavy Buy")
+    if pd.notna(sell_rank) and sell_rank <= 10:
+        tags.append("00981A Heavy Sell")
     return " | ".join(tags)
 
 
@@ -436,9 +425,9 @@ def add_strategy_columns(df: pd.DataFrame) -> pd.DataFrame:
     timing_component = out["setup"].map(timing_map).fillna(0)
     market_component = (0.7 * out["rs20_rank"].fillna(0)) + (0.3 * out["rs_accel"].fillna(0).rank(pct=True, ascending=True) * 100)
     etf_component = (
-        (out["etf_count"].fillna(0).clip(upper=2) / 2 * 40)
-        + (((out["00981A_top10"].fillna(False)) | (out["00992A_top10"].fillna(False))).astype(int) * 30)
-        + (((out["00981A_buy_flow_rank"].fillna(999) <= 10) | (out["00992A_buy_flow_rank"].fillna(999) <= 10)).astype(int) * 30)
+        out["00981A_top10"].fillna(False).astype(int) * 40
+        + out["00981A_new"].fillna(False).astype(int) * 20
+        + (out["00981A_buy_flow_rank"].fillna(999) <= 10).astype(int) * 40
     )
     out["trading_score"] = (0.60 * timing_component + 0.30 * market_component + 0.10 * etf_component).round(1)
     return out.sort_values(["setup", "trading_score", "rs20_rank"], ascending=[True, False, False]).reset_index(drop=True)
@@ -453,9 +442,8 @@ def export_excel(screen: pd.DataFrame, pool: pd.DataFrame, holdings: pd.DataFram
         "code", "name", "setup", "etf_tag", "market_tag", "trading_score",
         "rs20_rank", "rs_accel", "close_adj", "osc_flip_price", "ma20_upturn_price",
         "ma20_gt_ma60", "close_gt_ma60", "dif", "macd", "osc",
-        "00981A_source_date", "00992A_source_date", "00981A_rank", "00992A_rank", "00981A_weight", "00992A_weight",
+        "00981A_source_date", "00981A_rank", "00981A_weight", "00981A_top10", "00981A_new",
         "00981A_delta_shares", "00981A_flow_value", "00981A_buy_flow_rank", "00981A_sell_flow_rank",
-        "00992A_delta_shares", "00992A_flow_value", "00992A_buy_flow_rank", "00992A_sell_flow_rank",
         "date", "yahoo_symbol", "close_raw", "ret_5d", "ret_20d", "ret_60d", "volume_ratio",
         "ma5", "ma20", "ma60", "is_20d_high"
     ]
