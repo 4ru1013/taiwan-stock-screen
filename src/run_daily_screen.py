@@ -255,7 +255,12 @@ def calc_setup(row) -> str:
         return "D"
     if row["close_above_ma20"] and row["ma20_up"] and row["macd_bull"] and row["osc_positive"]:
         return "A"
-    if row["close_above_ma20"] and row["macd_near_cross"] and row["osc_improving"]:
+    if (
+        row["close_above_ma20"]
+        and row["macd_near_cross"]
+        and row["osc_positive"]
+        and row["osc_improving"]
+    ):
         return "B"
     if row["close_above_ma20"]:
         return "C"
