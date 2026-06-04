@@ -1,24 +1,5 @@
 ﻿Group,Rank,代號,股票,RS20,RS Accel,ETF Flow,評價,OSC翻正價,MA20上彎價,距離現價
-A,1,2481,強茂,98,-0.20,New Entry,強,,,
-A,2,1319,東陽,76,+0.36,New Entry,一般,,,
-A,3,2002,中鋼,47,+0.27,New Entry,一般,,,
-A,4,3376,新日興,45,+0.12,New Entry,一般,,,
-A,5,6191,精成科,37,+0.15,New Entry,一般,,,
-B,1,2404,漢唐,,,New Entry,,1258.4,Already Up,0.00%
-B,2,6223,旺矽,,,New Entry,,6816.0,Already Up,0.00%
-B,3,8210,勤誠,,,New Entry,,1494.24,Already Up,0.00%
-B,4,8996,高力,,,New Entry,,1153.22,Already Up,0.00%
-B,5,2345,智邦,,,New Entry,,2686.32,2352.89,
-B,6,3264,欣銓,,,New Entry,,244.02,213.53,
-B,7,8046,南電,,,New Entry,,901.69,830.32,
-B,8,2368,金像電,,,New Entry,,1385.56,1328.42,
-Priority1,1,2481,強茂,98,-0.20,New Entry,強,,,
-Priority1,2,1319,東陽,76,+0.36,New Entry,一般,,,
-Priority1,3,2002,中鋼,47,+0.27,New Entry,一般,,,
-Priority2,4,3376,新日興,45,+0.12,New Entry,一般,,,
-Priority2,5,6191,精成科,37,+0.15,New Entry,一般,,,
-Watchlist,1,2404,漢唐,,,New Entry,,1258.4,Already Up,0.00%
-Watchlist,2,6223,旺矽,,,New Entry,,6816.0,Already Up,0.00%
-Watchlist,3,8210,勤誠,,,New Entry,,1494.24,Already Up,0.00%
-Watchlist,4,8996,高力,,,New Entry,,1153.22,Already Up,0.00%
-Watchlist,5,2345,智邦,,,New Entry,,2686.32,2352.89,
+A,1,2481,強茂,98,-0.11,New Entry,強,,,
+A,2,2002,中鋼,43,+0.35,New Entry,一般,,,
+Priority1,1,2481,強茂,98,-0.11,New Entry,強,,,
+Priority1,2,2002,中鋼,43,+0.35,New Entry,一般,,,
