@@ -18,7 +18,7 @@ TAIEX_SYMBOL = "TAIEX"
 OUTPUT_DIR = pathlib.Path("output")
 RAW_DIR = pathlib.Path("data/raw")
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-GITHUB_CONTENTS_URL = "https://api.github.com/repos/{repo}/contents/data/out"
+GITHUB_CONTENTS_URL = "https://api.github.com/repos/{repo}/contents/data/out/holdings"
 
 
 def ensure_dirs() -> None:
@@ -239,236 +239,174 @@ def fetch_all_prices(pool: pd.DataFrame, days_back: int = 430) -> pd.DataFrame:
     if not frames:
         raise RuntimeError("No adjusted price data fetched.")
     prices = pd.concat(frames, ignore_index=True)
-    stock_count = prices.loc[prices["stock_id"] != TAIEX_SYMBOL, "stock_id"].nunique()
-    expected_count = len(ids)
-    if stock_count < max(1, int(expected_count * 0.8)):
-        raise RuntimeError(f"Adjusted price coverage too low: {stock_count}/{expected_count}")
-    prices.to_csv(RAW_DIR / "price_data.csv", index=False, encoding="utf-8-sig")
+    prices.to_csv(RAW_DIR / "prices_latest.csv", index=False, encoding="utf-8-sig")
     return prices
 
 
-def calc_next_day_osc(close_values: pd.Series, next_close: float) -> float:
-    series = pd.concat([close_values, pd.Series([next_close])], ignore_index=True)
-    ema8 = series.ewm(span=8, adjust=False).mean()
-    ema17 = series.ewm(span=17, adjust=False).mean()
-    dif = ema8 - ema17
-    macd = dif.ewm(span=9, adjust=False).mean()
-    return float((dif - macd).iloc[-1])
+def calc_macd(close: pd.Series, fast: int = 8, slow: int = 17, signal: int = 9):
+    dif = close.ewm(span=fast, adjust=False).mean() - close.ewm(span=slow, adjust=False).mean()
+    macd = dif.ewm(span=signal, adjust=False).mean()
+    osc = dif - macd
+    return dif, macd, osc
 
 
-def find_osc_flip_price(close_values: pd.Series, current_close: float, current_osc: float):
-    if pd.isna(current_osc) or pd.isna(current_close):
-        return np.nan
-    if current_osc > 0:
-        return "Already Positive"
-    low = float(current_close)
-    high = float(current_close) * 1.15
-    if calc_next_day_osc(close_values, high) <= 0:
-        return np.nan
-    for _ in range(30):
-        mid = (low + high) / 2
-        if calc_next_day_osc(close_values, mid) > 0:
-            high = mid
-        else:
-            low = mid
-    return round(high, 2)
-
-
-def find_ma20_upturn_price(close_values: pd.Series, current_close: float):
-    if len(close_values) < 20 or pd.isna(current_close):
-        return np.nan
-    ma20 = close_values.rolling(20).mean()
-    if len(ma20) >= 2 and ma20.iloc[-1] > ma20.iloc[-2]:
-        return "Already Upturn"
-    today_ma20 = float(ma20.iloc[-1])
-    last_19_sum = float(close_values.iloc[-19:].sum())
-    required = today_ma20 * 20 - last_19_sum
-    return round(max(required + 0.01, float(current_close)), 2)
-
-
-def add_indicators_for_one(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.sort_values("date").copy()
-    close = pd.to_numeric(df["close_adj"], errors="coerce")
-    volume = pd.to_numeric(df["Trading_Volume"], errors="coerce")
-
-    df["ma5"] = close.rolling(5).mean()
-    df["ma20"] = close.rolling(20).mean()
-    df["ma60"] = close.rolling(60).mean()
-    df["vol_ma20"] = volume.rolling(20).mean()
-    df["volume_ratio"] = volume / df["vol_ma20"]
-    df["ret_5d"] = close / close.shift(5) - 1
-    df["ret_20d"] = close / close.shift(20) - 1
-    df["ret_60d"] = close / close.shift(60) - 1
-
-    ema8 = close.ewm(span=8, adjust=False).mean()
-    ema17 = close.ewm(span=17, adjust=False).mean()
-    df["dif"] = ema8 - ema17
-    df["macd"] = df["dif"].ewm(span=9, adjust=False).mean()
-    df["osc"] = df["dif"] - df["macd"]
-    df["osc_prev"] = df["osc"].shift(1)
-    df["osc_expanding"] = df["osc"] > df["osc_prev"]
-    df["macd_cross_up"] = (df["dif"] > df["macd"]) & (df["dif"].shift(1) <= df["macd"].shift(1))
-    df["osc_turn_positive"] = (df["osc"] > 0) & (df["osc_prev"] <= 0)
-    df["above_ma20"] = close > df["ma20"]
-    df["ma20_gt_ma60"] = df["ma20"] > df["ma60"]
-    df["close_gt_ma60"] = close > df["ma60"]
-    df["dist_ma20_pct"] = close / df["ma20"] - 1
-    df["high_20d"] = close.rolling(20).max()
-    df["is_20d_high"] = close >= df["high_20d"]
-
-    if not df.empty:
-        idx = df.index[-1]
-        cur_close = float(close.iloc[-1]) if not pd.isna(close.iloc[-1]) else np.nan
-        cur_osc = float(df["osc"].iloc[-1]) if not pd.isna(df["osc"].iloc[-1]) else np.nan
-        df.loc[idx, "osc_flip_price"] = find_osc_flip_price(close.dropna().reset_index(drop=True), cur_close, cur_osc)
-        df.loc[idx, "ma20_upturn_price"] = find_ma20_upturn_price(close.dropna().reset_index(drop=True), cur_close)
-    return df
-
-
-def build_indicators(prices: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
-    pieces = [add_indicators_for_one(g) for _, g in prices.groupby("stock_id")]
-    ind = pd.concat(pieces, ignore_index=True)
-    latest = ind.sort_values("date").groupby("stock_id").tail(1).copy()
-
-    bench = latest[latest["stock_id"] == TAIEX_SYMBOL]
-    if bench.empty:
-        raise RuntimeError("Missing TAIEX benchmark; cannot calculate RS.")
-    bench_ret20 = float(bench["ret_20d"].iloc[0])
-    bench_ret60 = float(bench["ret_60d"].iloc[0])
-    print(f"[INFO] Benchmark latest date: {bench['date'].iloc[0]}, ret20={bench_ret20:.4f}, ret60={bench_ret60:.4f}")
-
-    latest = latest[latest["stock_id"] != TAIEX_SYMBOL].copy()
-    latest["rs20"] = latest["ret_20d"] - bench_ret20
-    latest["rs60"] = latest["ret_60d"] - bench_ret60
-    latest["rs_accel"] = latest["rs20"] - latest["rs60"]
-    latest["rs_score"] = 0.7 * latest["rs20"] + 0.3 * latest["rs_accel"]
-    latest["rs_rank"] = latest["rs_score"].rank(pct=True, ascending=True) * 100
-    latest["rs_rank"] = latest["rs_rank"].round(1)
-    latest["rs20_rank"] = latest["rs20"].rank(pct=True, ascending=True) * 100
-    latest["rs20_rank"] = latest["rs20_rank"].round(1)
-
-    latest = latest.rename(columns={"stock_id": "code"})
-    keep_cols = [
-        "code", "date", "yahoo_symbol", "close_raw", "close_adj", "Trading_Volume", "ma5", "ma20", "ma60", "vol_ma20", "volume_ratio",
-        "ret_5d", "ret_20d", "ret_60d", "rs20", "rs60", "rs_accel", "rs_score", "rs_rank", "rs20_rank",
-        "dif", "macd", "osc", "osc_prev", "osc_expanding", "macd_cross_up", "osc_turn_positive",
-        "above_ma20", "ma20_gt_ma60", "close_gt_ma60", "dist_ma20_pct", "is_20d_high", "osc_flip_price", "ma20_upturn_price"
-    ]
-    latest = latest[keep_cols]
-    merged = pool.merge(latest, on="code", how="left")
-    missing_price = merged["close_adj"].isna().sum()
-    if missing_price > 0:
-        print(f"[WARN] Missing adjusted price rows after merge: {missing_price}")
-    return merged
-
-
-def add_flow_ranks(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    value_col = "00981A_flow_value"
-    out[value_col] = out["00981A_delta_shares"].fillna(0) * out["close_adj"]
-    buy_mask = out[value_col] > 0
-    sell_mask = out[value_col] < 0
-    out["00981A_buy_flow_rank"] = np.nan
-    out["00981A_sell_flow_rank"] = np.nan
-    if buy_mask.any():
-        out.loc[buy_mask, "00981A_buy_flow_rank"] = out.loc[buy_mask, value_col].rank(ascending=False, method="min")
-    if sell_mask.any():
-        out.loc[sell_mask, "00981A_sell_flow_rank"] = (-out.loc[sell_mask, value_col]).rank(ascending=False, method="min")
-    return out
-
-
-def make_setup(row) -> str:
-    if not bool(row.get("ma20_gt_ma60", False)) or not bool(row.get("close_gt_ma60", False)):
+def calc_setup(row) -> str:
+    if not bool(row["osc_expanding"]):
         return "D"
-    osc_expanding = bool(row.get("osc_expanding", False))
-    if pd.notna(row.get("osc")) and row.get("osc") > 0 and osc_expanding:
+    if row["close_above_ma20"] and row["ma20_up"] and row["macd_bull"] and row["osc_positive"]:
         return "A"
-    flip = row.get("osc_flip_price")
-    close = row.get("close_adj")
-    if osc_expanding and isinstance(flip, (int, float, np.floating)) and pd.notna(flip) and pd.notna(close) and flip <= close * 1.05:
+    if row["close_above_ma20"] and row["macd_near_cross"] and row["osc_improving"]:
         return "B"
-    return "C"
+    if row["close_above_ma20"]:
+        return "C"
+    return "D"
 
 
-def make_etf_tag(row) -> str:
-    tags = []
-    if bool(row.get("00981A_top10", False)):
-        tags.append("00981A Top10")
-    if bool(row.get("00981A_new", False)):
-        tags.append("00981A New Entry")
-    buy_rank = row.get("00981A_buy_flow_rank")
-    sell_rank = row.get("00981A_sell_flow_rank")
-    if pd.notna(buy_rank) and buy_rank <= 10:
-        tags.append("00981A Heavy Buy")
-    if pd.notna(sell_rank) and sell_rank <= 10:
-        tags.append("00981A Heavy Sell")
-    return " | ".join(tags)
+def estimate_osc_flip_price(latest, close_series: pd.Series) -> str | float:
+    if latest["osc"] > 0:
+        return "Already > 0"
+    recent = close_series.dropna().tail(120)
+    if recent.empty:
+        return np.nan
+    base = float(latest["close_adj"])
+    candidates = np.linspace(base * 0.90, base * 1.20, 151)
+    history = recent.iloc[:-1]
+    for p in candidates:
+        test = pd.concat([history, pd.Series([p])], ignore_index=True)
+        _, _, osc = calc_macd(test)
+        if osc.iloc[-1] > 0:
+            return round(float(p), 2)
+    return np.nan
 
 
-def make_market_tag(row) -> str:
-    tags = []
-    if pd.notna(row.get("rs20_rank")) and row.get("rs20_rank") >= 80:
-        tags.append("Leader")
-    if pd.notna(row.get("rs_accel")):
-        if row.get("rs_accel") > 0:
-            tags.append("Accelerating")
-        elif row.get("rs_accel") < 0:
-            tags.append("Decelerating")
-    if pd.notna(row.get("osc")) and pd.notna(row.get("osc_prev")) and not bool(row.get("osc_expanding", False)):
-        tags.append("OSC Decelerating")
-    return " | ".join(tags)
+def estimate_ma20_upturn_price(close_series: pd.Series) -> str | float:
+    s = close_series.dropna()
+    if len(s) < 21:
+        return np.nan
+    curr_ma20 = s.tail(20).mean()
+    prev_ma20 = s.iloc[-21:-1].mean()
+    if curr_ma20 > prev_ma20:
+        return "Already Up"
+    prior_19 = s.iloc[-19:].sum()
+    prev_window = s.iloc[-20:-1].sum()
+    required = (prev_window / 19) * 20 - prior_19
+    return round(float(required), 2)
 
 
-def add_strategy_columns(df: pd.DataFrame) -> pd.DataFrame:
-    out = add_flow_ranks(df)
-    out["setup"] = out.apply(make_setup, axis=1)
-    out["etf_tag"] = out.apply(make_etf_tag, axis=1)
-    out["market_tag"] = out.apply(make_market_tag, axis=1)
+def compute_indicators(pool: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
+    benchmark = prices[prices["stock_id"] == TAIEX_SYMBOL].copy().sort_values("date")
+    if benchmark.empty or len(benchmark) < 80:
+        raise RuntimeError("Benchmark data insufficient.")
+    bench_latest = benchmark.iloc[-1]
+    bench_ret20 = bench_latest["close_adj"] / benchmark.iloc[-21]["close_adj"] - 1
+    bench_ret60 = bench_latest["close_adj"] / benchmark.iloc[-61]["close_adj"] - 1
+    print(f"[INFO] Benchmark latest date: {bench_latest['date']}, ret20={bench_ret20:.4f}, ret60={bench_ret60:.4f}")
 
-    timing_map = {"A": 100, "B": 90, "C": 55, "D": 0}
-    timing_component = out["setup"].map(timing_map).fillna(0)
-    market_component = (0.7 * out["rs20_rank"].fillna(0)) + (0.3 * out["rs_accel"].fillna(0).rank(pct=True, ascending=True) * 100)
-    etf_component = (
-        out["00981A_top10"].fillna(False).astype(int) * 40
-        + out["00981A_new"].fillna(False).astype(int) * 20
-        + (out["00981A_buy_flow_rank"].fillna(999) <= 10).astype(int) * 40
+    rows = []
+    for _, item in pool.iterrows():
+        code = item["code"]
+        p = prices[prices["stock_id"] == code].copy().sort_values("date")
+        if len(p) < 80:
+            print(f"[WARN] Skip {code} insufficient price rows: {len(p)}")
+            continue
+        p["ma5"] = p["close_adj"].rolling(5).mean()
+        p["ma20"] = p["close_adj"].rolling(20).mean()
+        p["ma60"] = p["close_adj"].rolling(60).mean()
+        p["dif"], p["macd"], p["osc"] = calc_macd(p["close_adj"])
+        latest = p.iloc[-1]
+        prev = p.iloc[-2]
+        ret20 = latest["close_adj"] / p.iloc[-21]["close_adj"] - 1
+        ret60 = latest["close_adj"] / p.iloc[-61]["close_adj"] - 1
+        rs20 = ret20 - bench_ret20
+        rs60 = ret60 - bench_ret60
+
+        row = item.to_dict()
+        row.update({
+            "date": latest["date"],
+            "close_adj": latest["close_adj"],
+            "close_raw": latest["close_raw"],
+            "volume": latest["Trading_Volume"],
+            "ma5": latest["ma5"],
+            "ma20": latest["ma20"],
+            "ma60": latest["ma60"],
+            "ma20_prev": prev["ma20"],
+            "dif": latest["dif"],
+            "macd": latest["macd"],
+            "osc": latest["osc"],
+            "osc_prev": prev["osc"],
+            "osc_expanding": latest["osc"] > prev["osc"],
+            "ret20": ret20,
+            "ret60": ret60,
+            "rs20": rs20,
+            "rs60": rs60,
+            "rs_accel": rs20 - rs60,
+            "close_above_ma20": latest["close_adj"] >= latest["ma20"],
+            "ma20_up": latest["ma20"] > prev["ma20"],
+            "macd_bull": latest["dif"] > latest["macd"],
+            "osc_positive": latest["osc"] > 0,
+            "osc_improving": latest["osc"] > prev["osc"],
+            "macd_near_cross": (latest["dif"] <= latest["macd"]) and ((latest["macd"] - latest["dif"]) / latest["close_adj"] < 0.015),
+        })
+        row["osc_flip_price"] = estimate_osc_flip_price(latest, p["close_adj"])
+        row["ma20_upturn_price"] = estimate_ma20_upturn_price(p["close_adj"])
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        raise RuntimeError("No candidates after indicator calculation.")
+    df["rs20_rank"] = df["rs20"].rank(pct=True) * 100
+    df["rs60_rank"] = df["rs60"].rank(pct=True) * 100
+    df["00981A_buy_flow_rank"] = df["00981A_delta_shares"].rank(pct=True) * 100
+    df["00981A_sell_flow_rank"] = (-df["00981A_delta_shares"]).rank(pct=True) * 100
+    df["setup"] = df.apply(calc_setup, axis=1)
+    df["trading_score"] = (
+        df["setup"].map({"A": 40, "B": 25, "C": 10, "D": 0}).fillna(0)
+        + df["rs20_rank"] * 0.30
+        + df["rs60_rank"] * 0.10
+        + df["00981A_buy_flow_rank"] * 0.20
+        + np.where(df["00981A_top10"], 10, 0)
+        + np.where(df["00981A_new"], 8, 0)
     )
-    out["trading_score"] = (0.60 * timing_component + 0.30 * market_component + 0.10 * etf_component).round(1)
-    return out.sort_values(["setup", "trading_score", "rs20_rank"], ascending=[True, False, False]).reset_index(drop=True)
+
+    df["etf_tag"] = np.select(
+        [
+            df["00981A_new"],
+            df["00981A_delta_shares"] > 0,
+            df["00981A_delta_shares"] < 0,
+        ],
+        ["New Entry", "Heavy Buy", "Heavy Sell"],
+        default="Neutral",
+    )
+    return df.sort_values(["setup", "trading_score"], ascending=[True, False]).reset_index(drop=True)
 
 
-def export_excel(screen: pd.DataFrame, pool: pd.DataFrame, holdings: pd.DataFrame) -> pathlib.Path:
-    today = date.today().strftime("%Y%m%d")
-    out_path = OUTPUT_DIR / f"daily_screen_{today}.xlsx"
+def export_outputs(df: pd.DataFrame) -> None:
+    latest_date = str(df["date"].max()).replace("-", "")
+    xlsx_path = OUTPUT_DIR / f"daily_screen_{latest_date}.xlsx"
     latest_path = OUTPUT_DIR / "daily_screen_latest.xlsx"
+    csv_path = OUTPUT_DIR / f"daily_screen_{latest_date}.csv"
+    latest_csv_path = OUTPUT_DIR / "daily_screen_latest.csv"
 
-    ranking_cols = [
-        "code", "name", "setup", "etf_tag", "market_tag", "trading_score",
-        "rs20_rank", "rs_accel", "close_adj", "osc_flip_price", "ma20_upturn_price",
-        "ma20_gt_ma60", "close_gt_ma60", "dif", "macd", "osc", "osc_prev", "osc_expanding",
-        "00981A_source_date", "00981A_rank", "00981A_weight", "00981A_top10", "00981A_new",
-        "00981A_delta_shares", "00981A_flow_value", "00981A_buy_flow_rank", "00981A_sell_flow_rank",
-        "date", "yahoo_symbol", "close_raw", "ret_5d", "ret_20d", "ret_60d", "volume_ratio",
-        "ma5", "ma20", "ma60", "is_20d_high"
+    cols = [
+        "date", "code", "name", "setup", "trading_score", "etf_tag",
+        "00981A_source_date", "00981A_shares", "00981A_weight", "00981A_rank", "00981A_top10", "00981A_new",
+        "00981A_prev_shares", "00981A_delta_shares", "00981A_delta_pct",
+        "close_raw", "close_adj", "volume", "ma5", "ma20", "ma20_prev", "ma60",
+        "dif", "macd", "osc", "osc_prev", "osc_expanding", "ret20", "ret60", "rs20", "rs60", "rs_accel",
+        "rs20_rank", "rs60_rank", "close_above_ma20", "ma20_up", "macd_bull", "osc_positive", "osc_improving",
+        "macd_near_cross", "osc_flip_price", "ma20_upturn_price",
     ]
-    ranking_cols = [c for c in ranking_cols if c in screen.columns]
+    existing_cols = [c for c in cols if c in df.columns]
+    export_df = df[existing_cols].copy()
 
-    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        screen[ranking_cols].to_excel(writer, sheet_name="Ranking", index=False)
-        pool.to_excel(writer, sheet_name="Candidate_Pool", index=False)
-        holdings.to_excel(writer, sheet_name="ETF_Holdings", index=False)
-        screen.to_excel(writer, sheet_name="Full_Data", index=False)
-
-    with pd.ExcelWriter(latest_path, engine="openpyxl") as writer:
-        screen[ranking_cols].to_excel(writer, sheet_name="Ranking", index=False)
-        pool.to_excel(writer, sheet_name="Candidate_Pool", index=False)
-        holdings.to_excel(writer, sheet_name="ETF_Holdings", index=False)
-        screen.to_excel(writer, sheet_name="Full_Data", index=False)
-
-    screen.to_csv(OUTPUT_DIR / "daily_screen_latest.csv", index=False, encoding="utf-8-sig")
-    print(f"[OK] Exported {out_path}")
+    export_df.to_excel(xlsx_path, index=False)
+    export_df.to_excel(latest_path, index=False)
+    export_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    export_df.to_csv(latest_csv_path, index=False, encoding="utf-8-sig")
+    print(f"[OK] Exported {xlsx_path}")
     print(f"[OK] Exported {latest_path}")
-    return out_path
+    print(f"[OK] Exported {csv_path}")
+    print(f"[OK] Exported {latest_csv_path}")
 
 
 def main() -> None:
@@ -476,9 +414,8 @@ def main() -> None:
     holdings = load_etf_holdings()
     pool = build_candidate_pool(holdings)
     prices = fetch_all_prices(pool)
-    screen = build_indicators(prices, pool)
-    screen = add_strategy_columns(screen)
-    export_excel(screen, pool, holdings)
+    result = compute_indicators(pool, prices)
+    export_outputs(result)
 
 
 if __name__ == "__main__":
