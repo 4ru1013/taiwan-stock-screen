@@ -15,7 +15,7 @@
 
 |   Rank |   代號 | 股票   |   RS20 |   RS Accel | ETF Flow   | 評價   |
 |-------:|-------:|:-------|-------:|-----------:|:-----------|:-------|
-|      1 |   8996 | 高力   |     70 |        0.2 | Neutral    | 一般   |
+|      1 |   8996 | 高力   |     70 |        0.2 | Heavy Sell | 一般   |
 
 ## 3. B組
 
@@ -43,7 +43,7 @@
 - Setup：A
 - RS20：70
 - RS Accel：+0.20
-- ETF Flow：Neutral
+- ETF Flow：Heavy Sell
 - OSC：5.68 → 7.07
 - OSC Expansion：True
 - MA20上彎價：Already Up
