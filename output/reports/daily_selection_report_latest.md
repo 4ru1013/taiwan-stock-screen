@@ -15,12 +15,12 @@
 
 |   Rank |   代號 | 股票    |   RS20 |   RS Accel | ETF Flow   | 評價   |
 |-------:|-------:|:--------|-------:|-----------:|:-----------|:-------|
-|      1 |   3653 | 健策    |     92 |      -0.86 | Neutral    | 強     |
-|      2 |   5347 | 世界    |     86 |       0.2  | Neutral    | 可觀察 |
-|      3 |   3665 | 貿聯-KY |     74 |      -0.18 | Neutral    | 一般   |
-|      4 |   6278 | 台表科  |     70 |       0    | Heavy Sell | 一般   |
-|      5 |   4958 | 臻鼎-KY |     64 |       0.2  | Neutral    | 一般   |
-|      6 |   8046 | 南電    |     54 |      -0.07 | Neutral    | 一般   |
+|      1 |   3653 | 健策    |     92 |      -0.85 | Neutral    | 強     |
+|      2 |   5347 | 世界    |     86 |       0.21 | Neutral    | 可觀察 |
+|      3 |   3665 | 貿聯-KY |     74 |      -0.16 | Neutral    | 一般   |
+|      4 |   6278 | 台表科  |     70 |       0.01 | Neutral    | 一般   |
+|      5 |   4958 | 臻鼎-KY |     64 |       0.22 | Neutral    | 一般   |
+|      6 |   8046 | 南電    |     54 |      -0.06 | Neutral    | 一般   |
 
 ## 3. B組
 
@@ -50,7 +50,7 @@
 
 - Setup：A
 - RS20：92
-- RS Accel：-0.86
+- RS Accel：-0.85
 - ETF Flow：Neutral
 - OSC：117.02 → 145.60
 - OSC Expansion：True
@@ -61,7 +61,7 @@
 
 - Setup：A
 - RS20：86
-- RS Accel：+0.20
+- RS Accel：+0.21
 - ETF Flow：Neutral
 - OSC：1.52 → 1.72
 - OSC Expansion：True
@@ -72,7 +72,7 @@
 
 - Setup：A
 - RS20：74
-- RS Accel：-0.18
+- RS Accel：-0.16
 - ETF Flow：Neutral
 - OSC：51.55 → 56.16
 - OSC Expansion：True
