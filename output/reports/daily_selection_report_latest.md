@@ -1,33 +1,29 @@
 # 00981A 每日選股報告
 
-日期：2026-10-07
+日期：2026-10-08
 
 ## 1. 今日系統狀況
 
 - 00981A 持股數：50
-- A：13
+- A：9
 - B：0
-- C：6
-- D：31
-- Market Regime：Risk On
+- C：5
+- D：36
+- Market Regime：Neutral
 
 ## 2. A組
 
 |   Rank |   代號 | 股票    |   RS20 |   RS Accel | ETF Flow   | 評價   |
 |-------:|-------:|:--------|-------:|-----------:|:-----------|:-------|
-|      1 |   8996 | 高力    |     92 |       0.05 | Neutral    | 強     |
-|      2 |   6278 | 台表科  |     90 |      -0.06 | Neutral    | 強     |
-|      3 |   4958 | 臻鼎-KY |     80 |       0.31 | Neutral    | 可觀察 |
-|      4 |   6187 | 萬潤    |     74 |      -0.34 | Neutral    | 一般   |
-|      5 |   2368 | 金像電  |     70 |      -0.03 | Heavy Buy  | 一般   |
-|      6 |   2327 | 國巨*   |     66 |       0.35 | Neutral    | 一般   |
-|      7 |   2383 | 台光電  |     60 |      -0.04 | Neutral    | 一般   |
-|      8 |   2360 | 致茂    |     58 |      -0.18 | Neutral    | 一般   |
-|      9 |   6191 | 精成科  |     52 |       0.24 | Neutral    | 一般   |
-|     10 |   6271 | 同欣電  |     48 |       0.06 | Neutral    | 一般   |
-|     11 |   3661 | 世芯-KY |     44 |       0.06 | Neutral    | 一般   |
-|     12 |   3008 | 大立光  |     40 |      -0.52 | Neutral    | 一般   |
-|     13 |   6223 | 旺矽    |     32 |       0.22 | Neutral    | 一般   |
+|      1 |   8996 | 高力    |     94 |      -0.02 | Heavy Buy  | 強     |
+|      2 |   6278 | 台表科  |     90 |      -0.09 | Neutral    | 強     |
+|      3 |   2368 | 金像電  |     78 |      -0.04 | Neutral    | 一般   |
+|      4 |   6271 | 同欣電  |     60 |       0.05 | Neutral    | 一般   |
+|      5 |   3661 | 世芯-KY |     54 |      -0.06 | Neutral    | 一般   |
+|      6 |   6191 | 精成科  |     50 |       0.2  | Neutral    | 一般   |
+|      7 |   2439 | 美律    |     46 |       0.11 | Neutral    | 一般   |
+|      8 |   2345 | 智邦    |     44 |       0.18 | Neutral    | 一般   |
+|      9 |   2408 | 南亞科  |     28 |      -0.15 | Neutral    | 一般   |
 
 ## 3. B組
 
@@ -40,12 +36,12 @@
 
 - 8996 高力
 - 6278 台表科
-- 4958 臻鼎-KY
+- 2368 金像電
 
 ### Priority 2
 
-- 6187 萬潤
-- 2368 金像電
+- 6271 同欣電
+- 3661 世芯-KY
 
 ### Watchlist
 
@@ -56,10 +52,10 @@
 ## 8996 高力
 
 - Setup：A
-- RS20：92
-- RS Accel：+0.05
-- ETF Flow：Neutral
-- OSC：-1.07 → 0.71
+- RS20：94
+- RS Accel：-0.02
+- ETF Flow：Heavy Buy
+- OSC：0.73 → 5.94
 - OSC Expansion：True
 - MA20上彎價：Already Up
 - 判斷：強
@@ -68,30 +64,30 @@
 
 - Setup：A
 - RS20：90
-- RS Accel：-0.06
+- RS Accel：-0.09
 - ETF Flow：Neutral
-- OSC：2.52 → 4.11
+- OSC：4.11 → 4.28
 - OSC Expansion：True
 - MA20上彎價：Already Up
 - 判斷：強
 
-## 4958 臻鼎-KY
+## 2368 金像電
 
 - Setup：A
-- RS20：80
-- RS Accel：+0.31
+- RS20：78
+- RS Accel：-0.04
 - ETF Flow：Neutral
-- OSC：12.16 → 13.17
+- OSC：22.51 → 23.87
 - OSC Expansion：True
 - MA20上彎價：Already Up
-- 判斷：可觀察
+- 判斷：一般
 
 
 ## 回測索引
 
-- Date：2026-10-07
-- A Count：13
+- Date：2026-10-08
+- A Count：9
 - B Count：0
-- Priority 1：8996, 6278, 4958
-- Priority 2：6187, 2368
+- Priority 1：8996, 6278, 2368
+- Priority 2：6271, 3661
 - Watchlist：
