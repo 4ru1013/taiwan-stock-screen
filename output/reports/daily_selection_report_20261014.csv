@@ -1,0 +1,12 @@
+﻿Group,Rank,代號,股票,RS20,RS Accel,ETF Flow,評價,OSC翻正價,MA20上彎價,距離現價
+A,1,6278,台表科,100,-0.12,Neutral,強,,,
+A,2,2368,金像電,84,-0.05,Heavy Buy,可觀察,,,
+A,3,3264,欣銓,78,-0.01,Heavy Buy,一般,,,
+A,4,2439,美律,48,+0.11,Neutral,一般,,,
+A,5,2002,中鋼,34,+0.06,Neutral,一般,,,
+A,6,2637,慧洋-KY,30,-0.19,Neutral,一般,,,
+Priority1,1,6278,台表科,100,-0.12,Neutral,強,,,
+Priority1,2,2368,金像電,84,-0.05,Heavy Buy,可觀察,,,
+Priority1,3,3264,欣銓,78,-0.01,Heavy Buy,一般,,,
+Priority2,4,2439,美律,48,+0.11,Neutral,一般,,,
+Priority2,5,2002,中鋼,34,+0.06,Neutral,一般,,,
