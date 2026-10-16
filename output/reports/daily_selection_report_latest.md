@@ -1,21 +1,22 @@
 # 00981A 每日選股報告
 
-日期：2026-10-15
+日期：2026-10-16
 
 ## 1. 今日系統狀況
 
 - 00981A 持股數：50
-- A：1
+- A：2
 - B：0
-- C：1
-- D：48
+- C：3
+- D：45
 - Market Regime：Risk Off
 
 ## 2. A組
 
 |   Rank |   代號 | 股票   |   RS20 |   RS Accel | ETF Flow   | 評價   |
 |-------:|-------:|:-------|-------:|-----------:|:-----------|:-------|
-|      1 |   6278 | 台表科 |    100 |      -0.21 | Neutral    | 強     |
+|      1 |   2002 | 中鋼   |     52 |       0.03 | Neutral    | 一般   |
+|      2 |   3376 | 新日興 |     36 |       0.1  | Neutral    | 一般   |
 
 ## 3. B組
 
@@ -26,7 +27,8 @@
 
 ### Priority 1
 
-- 6278 台表科
+- 2002 中鋼
+- 3376 新日興
 
 ### Priority 2
 
@@ -38,23 +40,34 @@
 
 ## 5. 深度分析
 
-## 6278 台表科
+## 2002 中鋼
 
 - Setup：A
-- RS20：100
-- RS Accel：-0.21
+- RS20：52
+- RS Accel：+0.03
 - ETF Flow：Neutral
-- OSC：6.91 → 7.99
+- OSC：0.06 → 0.07
 - OSC Expansion：True
 - MA20上彎價：Already Up
-- 判斷：強
+- 判斷：一般
+
+## 3376 新日興
+
+- Setup：A
+- RS20：36
+- RS Accel：+0.10
+- ETF Flow：Neutral
+- OSC：1.66 → 1.67
+- OSC Expansion：True
+- MA20上彎價：Already Up
+- 判斷：一般
 
 
 ## 回測索引
 
-- Date：2026-10-15
-- A Count：1
+- Date：2026-10-16
+- A Count：2
 - B Count：0
-- Priority 1：6278
+- Priority 1：2002, 3376
 - Priority 2：
 - Watchlist：
