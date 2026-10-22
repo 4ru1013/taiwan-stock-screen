@@ -1,9 +1,3 @@
 ﻿Group,Rank,代號,股票,RS20,RS Accel,ETF Flow,評價,OSC翻正價,MA20上彎價,距離現價
-A,1,6278,台表科,100,-0.29,Neutral,強,,,
-A,2,3231,緯創,71,+0.04,Heavy Buy,一般,,,
-A,3,2439,美律,65,+0.09,Neutral,一般,,,
-A,4,3376,新日興,61,+0.09,Neutral,一般,,,
-Priority1,1,6278,台表科,100,-0.29,Neutral,強,,,
-Priority1,2,3231,緯創,71,+0.04,Heavy Buy,一般,,,
-Priority1,3,2439,美律,65,+0.09,Neutral,一般,,,
-Priority2,4,3376,新日興,61,+0.09,Neutral,一般,,,
+A,1,3231,緯創,78,+0.04,Neutral,一般,,,
+Priority1,1,3231,緯創,78,+0.04,Neutral,一般,,,
