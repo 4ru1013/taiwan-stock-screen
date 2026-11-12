@@ -1,14 +1,14 @@
 # 00981A 每日選股報告
 
-日期：2026-11-10
+日期：2026-11-11
 
 ## 1. 今日系統狀況
 
 - 00981A 持股數：50
 - A：1
 - B：0
-- C：0
-- D：49
+- C：8
+- D：41
 - Market Regime：Risk Off
 
 ## 2. A組
@@ -44,7 +44,7 @@
 - RS20：100
 - RS Accel：-0.03
 - ETF Flow：Neutral
-- OSC：-0.76 → 0.05
+- OSC：0.05 → 1.10
 - OSC Expansion：True
 - MA20上彎價：Already Up
 - 判斷：強
@@ -52,7 +52,7 @@
 
 ## 回測索引
 
-- Date：2026-11-10
+- Date：2026-11-11
 - A Count：1
 - B Count：0
 - Priority 1：1802
