@@ -1,21 +1,20 @@
 # 00981A 每日選股報告
 
-日期：2026-11-18
+日期：2026-11-19
 
 ## 1. 今日系統狀況
 
 - 00981A 持股數：50
-- A：1
+- A：0
 - B：0
-- C：1
-- D：48
+- C：0
+- D：50
 - Market Regime：Risk Off
 
 ## 2. A組
 
-|   Rank |   代號 | 股票    |   RS20 |   RS Accel | ETF Flow   | 評價   |
-|-------:|-------:|:--------|-------:|-----------:|:-----------|:-------|
-|      1 |   3661 | 世芯-KY |    100 |       0.06 | Neutral    | 強     |
+無
+
 
 ## 3. B組
 
@@ -26,7 +25,7 @@
 
 ### Priority 1
 
-- 3661 世芯-KY
+- 無
 
 ### Priority 2
 
@@ -38,23 +37,14 @@
 
 ## 5. 深度分析
 
-## 3661 世芯-KY
-
-- Setup：A
-- RS20：100
-- RS Accel：+0.06
-- ETF Flow：Neutral
-- OSC：81.54 → 95.29
-- OSC Expansion：True
-- MA20上彎價：Already Up
-- 判斷：強
+無
 
 
 ## 回測索引
 
-- Date：2026-11-18
-- A Count：1
+- Date：2026-11-19
+- A Count：0
 - B Count：0
-- Priority 1：3661
+- Priority 1：
 - Priority 2：
 - Watchlist：
